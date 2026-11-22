@@ -290,19 +290,15 @@ def add_funnel_spouts(mold, master, props, coll):
         # narrows going down, so the deep part stays slim and inside the cavity, which
         # is carved away. Paired with the flared cup, the spout is a pair of cones.
         neck_base = max(f["neck_out"] * C.NECK_TAPER, f["wall"])
-        neck = util.add_cone(
-            "MF_funnel", Vector((f["x"], f["y"], (f["base_z"] + t_z) * 0.5)),
-            neck_base, f["neck_out"], t_z - f["base_z"], 'Z', coll,
-        )
-        util.boolean(mold, neck, 'UNION')
-        util.remove_object(neck)
+        # neck and cup as ONE solid of revolution: as two cones joined end to
+        # end their faces met exactly at the throat, and Blender 5.2's booleans
+        # left the shell folded there (crossing faces where the wings join)
+        rings = [(f["base_z"], neck_base), (t_z, f["neck_out"])]
         if f["apex_z"] - t_z > 0.1:
-            cup = util.add_cone(
-                "MF_funnel", Vector((f["x"], f["y"], (t_z + f["apex_z"]) * 0.5)),
-                f["neck_out"], f["mouth_out"], f["apex_z"] - t_z, 'Z', coll,
-            )
-            util.boolean(mold, cup, 'UNION')
-            util.remove_object(cup)
+            rings.append((f["apex_z"], f["mouth_out"]))
+        spout = util.add_lathe("MF_funnel", f["x"], f["y"], rings, coll)
+        util.boolean(mold, spout, 'UNION')
+        util.remove_object(spout)
     return funnels
 
 

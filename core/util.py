@@ -430,10 +430,51 @@ def _zigzag_edges(bm, face):
     return out
 
 
+def weld_zero_edges(obj, dist=1e-5):
+    """Zero-area triangles a boolean leaves with two corners at the very same
+    point, joined by an edge of no length (Blender 5.2's solvers leave them
+    where a wing meets the shell in a deep crease). They show no area, so
+    ``folded_faces`` never sees them, but they lie flat on their neighbours and
+    read as self-intersections to a slicer's check. Welding those corners and
+    dissolving what collapses removes them; kept only if the mesh is still a
+    valid solid. Returns how many such edges there were."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    try:
+        near = set()
+        n = 0
+        for e in bm.edges:
+            if e.calc_length() <= dist:
+                near.update(e.verts)
+                n += 1
+        if not n:
+            return 0
+        was_valid = part_is_valid(obj)[0]
+        bak = obj.data.copy()
+        bmesh.ops.remove_doubles(bm, verts=list(near), dist=dist)
+        bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges[:])
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    finally:
+        bm.free()
+    if was_valid and not part_is_valid(obj)[0]:
+        cur = obj.data
+        obj.data = bak
+        if cur.users == 0:
+            bpy.data.meshes.remove(cur)
+        return n
+    if bak.users == 0:
+        bpy.data.meshes.remove(bak)
+    return n
+
+
 def fix_folded_faces(obj, dist=1e-4):
-    """Repair ``folded_faces``, in two stages, each kept only if it leaves the
+    """Repair ``folded_faces``, in stages, each kept only if it leaves the
     mesh a valid solid with fewer folds (else the mesh is restored):
 
+    0. A slit face that runs out and back over pairs of vertices at the very
+       same spot (a crack a later boolean sealed with a zero-area face):
+       welding just those duplicates closes it.
     1. Zero-area polygons that run out and back along the same line (a slit or
        spike left where the boolean merged coplanar pieces): dissolving
        degenerate geometry within ``dist`` welds them shut.
@@ -453,12 +494,25 @@ def fix_folded_faces(obj, dist=1e-4):
     bad = folded_faces(obj)
     if not bad:
         return 0
-    for stage in (1, 2, 3):
+    for stage in (0, 1, 2, 3):
         bak = obj.data.copy()
         bm = bmesh.new()
         bm.from_mesh(obj.data)
         try:
-            if stage == 1:
+            if stage == 0:
+                # a slit: the face runs out and back over pairs of vertices
+                # at the very same spot - weld just those, and it closes
+                bm.verts.ensure_lookup_table()
+                bm.faces.ensure_lookup_table()
+                near = {v for fi in bad if fi < len(bm.faces)
+                        for v in bm.faces[fi].verts}
+                near |= {o for v in list(near) for e in v.link_edges
+                         for o in (e.other_vert(v),)}
+                bmesh.ops.remove_doubles(bm, verts=list(near), dist=1e-5)
+                bmesh.ops.dissolve_degenerate(
+                    bm, dist=1e-6, edges=list({e for v in near if v.is_valid
+                                               for e in v.link_edges}))
+            elif stage == 1:
                 bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges[:])
             elif stage == 3:
                 bm.faces.ensure_lookup_table()
@@ -834,6 +888,27 @@ def add_sphere(name, center, radius, coll, subdiv=2):
     bm = bmesh.new()
     bmesh.ops.create_icosphere(bm, subdivisions=subdiv, radius=radius,
                                matrix=Matrix.Translation(center))
+    return new_mesh_object(name, bm, coll)
+
+
+def add_lathe(name, x, y, rings, coll, segments=48):
+    """A closed solid of revolution about the vertical line through (x, y):
+    ``rings`` is ``[(z, radius), ...]`` from the bottom up. One mesh, so stacked
+    cones need no boolean between them (two cones joined end to end share a face
+    exactly, and Blender 5.2's booleans fold the shell there)."""
+    bm = bmesh.new()
+    loops = []
+    for z, r in rings:
+        loops.append([bm.verts.new((x + r * math.cos(2.0 * math.pi * k / segments),
+                                    y + r * math.sin(2.0 * math.pi * k / segments), z))
+                      for k in range(segments)])
+    for lo, hi in zip(loops, loops[1:]):
+        for k in range(segments):
+            m = (k + 1) % segments
+            bm.faces.new((lo[k], lo[m], hi[m], hi[k]))
+    bm.faces.new(list(reversed(loops[0])))
+    bm.faces.new(loops[-1])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     return new_mesh_object(name, bm, coll)
 
 

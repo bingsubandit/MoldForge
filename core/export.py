@@ -4,16 +4,19 @@ import os
 import struct
 
 import bpy
+from mathutils import Matrix
 
 
-def export_stl(obj, filepath):
-    """Write ``obj`` (with its world transform applied) as a binary STL."""
+def export_stl(obj, filepath, scale=1.0):
+    """Write ``obj`` (with its world transform applied) as a binary STL, its
+    coordinates times ``scale``: STL has no units and slicers read millimetres,
+    so the caller passes the scene's millimetres per Blender unit."""
     deps = bpy.context.evaluated_depsgraph_get()
     eval_obj = obj.evaluated_get(deps)
     me = eval_obj.to_mesh()
     try:
         me.calc_loop_triangles()
-        mw = eval_obj.matrix_world   # consistent with the evaluated mesh
+        mw = Matrix.Scale(scale, 4) @ eval_obj.matrix_world   # evaluated mesh, in mm
         verts = me.vertices
         tris = me.loop_triangles
 
@@ -41,11 +44,11 @@ def _safe_name(name):
     return cleaned.strip("._") or "part"
 
 
-def export_objects(objects, directory):
+def export_objects(objects, directory, scale=1.0):
     os.makedirs(directory, exist_ok=True)
     written = []
     for obj in objects:
         path = os.path.join(directory, f"{_safe_name(obj.name)}.stl")
-        export_stl(obj, path)
+        export_stl(obj, path, scale)
         written.append(path)
     return written

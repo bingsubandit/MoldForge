@@ -17,6 +17,10 @@ from .operators import (
     MOLDFORGE_OT_add_pour_marker,
     MOLDFORGE_OT_regenerate,
     MOLDFORGE_OT_toggle_master,
+    MOLDFORGE_OT_fix_bottom,
+    MOLDFORGE_OT_read_as_metres,
+    MOLDFORGE_OT_add_split_plane,
+    MOLDFORGE_OT_mark_core,
 )
 from .panel import PANEL_CLASSES
 from .saved_settings import SETTINGS_CLASSES
@@ -32,6 +36,10 @@ _classes = (
     MOLDFORGE_OT_add_pour_marker,
     MOLDFORGE_OT_regenerate,
     MOLDFORGE_OT_toggle_master,
+    MOLDFORGE_OT_fix_bottom,
+    MOLDFORGE_OT_read_as_metres,
+    MOLDFORGE_OT_add_split_plane,
+    MOLDFORGE_OT_mark_core,
     *SETTINGS_CLASSES,
     *PANEL_CLASSES,
 )

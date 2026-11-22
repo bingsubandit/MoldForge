@@ -7,6 +7,7 @@ a coarse Safe Remesh.
 """
 
 import math
+import string
 import types
 
 import bpy
@@ -16,6 +17,9 @@ from . import constants as C
 from . import util, meshprep, build, sprue, split, volume, channel
 from . import label as mflabel
 from . import legs as mflegs
+from . import planes as mfplanes
+from . import cores as mfcores
+from .artwork import svg_curves as _svg_curves, design_to_solid as _design_to_solid
 
 
 class MoldGeometryError(RuntimeError):
@@ -85,7 +89,64 @@ def prebuild_warnings(master, props):
     return out
 
 
+def _build_scale(props):
+    """Millimetres per Blender unit for this build (``units.build_props`` sets
+    it from the scene; 1 when the props come from anywhere else)."""
+    k = getattr(props, "build_scale", 1.0) or 1.0
+    return float(k) if k > 0.0 else 1.0
+
+
+def _into_mm(obj, k):
+    """Bake ``obj``'s transform, scaled ``k`` times about the world origin, into
+    its mesh (a working copy), so the build sees it in millimetres."""
+    if abs(k - 1.0) < 1e-9:
+        return
+    obj.data.transform(Matrix.Scale(k, 4) @ obj.matrix_world)
+    obj.matrix_world = Matrix.Identity(4)
+    obj.data.update()
+
+
+def _back_to_scene_units(res, k, before):
+    """Scale everything the build made (objects not in ``before``, a set of
+    session ids) back from millimetres to scene units about the world origin,
+    and the volumes with them."""
+    inv = 1.0 / k
+    s = Matrix.Scale(inv, 4)
+    done = set()
+    for o in list(bpy.data.objects):
+        if o.session_uid in before:
+            continue
+        d = o.data
+        if d is not None and hasattr(d, "transform") and d.session_uid not in done:
+            d.transform(s)
+            done.add(d.session_uid)
+            if hasattr(d, "update"):
+                d.update()
+        o.location = o.location * inv
+    for key, v in list(res.items()):
+        if key.endswith("_volume") and isinstance(v, (int, float)) \
+                and not isinstance(v, bool):
+            res[key] = v * inv ** 3
+
+
 def staged_build(master, props, auto_recover=True):
+    """The build as a generator (see ``_staged_build``).
+
+    Every size in the build is in millimetres: the panel's fields, and the fixed
+    clearances and margins in the code. When a Blender unit is not a millimetre
+    (Unit Scale 1.0 with Length in mm, cm, inches...) the build runs on copies
+    scaled to millimetres and what it makes is scaled back to the scene's units
+    at the end, volumes included, so the mold is the right size in any scene."""
+    k = _build_scale(props)
+    if abs(k - 1.0) < 1e-9:
+        return (yield from _staged_build(master, props, auto_recover))
+    before = {o.session_uid for o in bpy.data.objects}
+    res = yield from _staged_build(master, props, auto_recover)
+    _back_to_scene_units(res, k, before)
+    return res
+
+
+def _staged_build(master, props, auto_recover=True):
     """The build as a generator: yields ``(fraction, phase-label)`` as it works and
     returns the result dict (StopIteration.value). Drive it across modal ticks for
     live progress, or run it via ``build_mold_system``.
@@ -206,7 +267,8 @@ def _build_once(master, props, trim_ok=False):
 
     # Where the master actually sits — the result is moved here at the end.
     omn, omx = util.world_bbox(master)
-    home = (omn + omx) * 0.5
+    k = _build_scale(props)
+    home = (omn + omx) * 0.5 * k          # build space is in millimetres
 
     coll = util.ensure_collection()
     # Dual-density second run: the master IS the Core_Master from the first run,
@@ -227,6 +289,7 @@ def _build_once(master, props, trim_ok=False):
             util.remove_object(obj)
 
     work = util.duplicate_object(master, "MF_Positive", coll)
+    _into_mm(work, k)
     try:
         yield (0.05, "preparing mesh")
         # A non-manifold mesh makes the fast boolean solver bail (booleans get
@@ -242,6 +305,19 @@ def _build_once(master, props, trim_ok=False):
                 meshprep.heal(work)
             else:
                 meshprep.ensure_outward_normals(work)
+        # A boolean-cut flat bottom is one face of needle-thin triangles that
+        # every later boolean on it (the plinth, the plate, the shell) has to
+        # slice: rebuild it as an even mesh on this working copy.
+        bottom_note = ""
+        if getattr(props, "fix_bottom", True):
+            fixed, bottom_note = meshprep.fix_flat_bottom(work, only_if_bad=True)
+            if not fixed and not bottom_note.startswith("the flat bottom could not"):
+                bottom_note = ""
+        if props.heal:
+            holes = meshprep.close_small_holes(work)
+            if holes:
+                bottom_note = "; ".join(x for x in (
+                    bottom_note, f"closed {holes} tiny hole(s) in the model's mesh") if x)
         if props.decimate:
             meshprep.decimate(work, props.decimate_ratio)
         meshprep.center_object(work)
@@ -249,9 +325,18 @@ def _build_once(master, props, trim_ok=False):
         p = _derive_sizes(work, props)
         # User markers are placed in WORLD space around the master; the build is
         # centred at the origin, so shift them into build space here.
-        p.vent_marks = ([m - home for m in util.marker_points("MF_VentMark")]
+        p.vent_marks = ([m * k - home for m in util.marker_points("MF_VentMark")]
                         if getattr(p, "vent_place", 'AUTO') == 'MARKERS' else [])
-        p.pour_marks = [m - home for m in util.marker_points("MF_PourMark")]
+        p.pour_marks = [m * k - home for m in util.marker_points("MF_PourMark")]
+        # Free split planes (the user's MF_SplitPlane objects), in build space.
+        user_planes = (mfplanes.user_planes(home, k)
+                       if getattr(p, "use_split_planes", False) else [])
+        planes_note = ""
+        if user_planes:
+            p.parts_count = 2              # no radial wedges on top of the planes
+        if getattr(p, "use_split_planes", False) and not user_planes:
+            planes_note = ("Split with my planes is on, but there are no split planes "
+                           "- add one with Add Split Plane; used the standard split")
         # A Locking Base keeps MF_Positive (and the plinth) at the model's FULL detail,
         # so the working copy must NOT be voxel-remeshed — the jacket dilations clean
         # themselves instead. (This is why the old version showed a low-poly positive.)
@@ -414,7 +499,13 @@ def _build_once(master, props, trim_ok=False):
         wing_bolt_zs = None         # bolt heights on 2-part wings; wing keys go between
         parting = None              # contoured parting shared by the wings and the split
         yield (0.55, "adding clamp wings")
-        if p.wings:
+        plane_bolts = 0
+        if p.wings and user_planes:
+            # one flange along every split plane, bolted across
+            plane_bolts = mfplanes.add_plane_flanges(
+                mold, shape_ref, user_planes, p, coll, _offset(p), p.wing_width,
+                p.wing_thickness, p.bolt_radius, funnels=funnels, under=wing_pocket)
+        elif p.wings:
             if multipart:
                 # One flange per radial seam, bolts tangential. The rind hugs the
                 # *model's* profile, which a block's bounding box swallows — so a
@@ -496,7 +587,10 @@ def _build_once(master, props, trim_ok=False):
         # cavity carve trims anything inside it) and bored after the carve.
         chan = None
         chan_note = ""
-        if getattr(p, "pour_channel", False) and cavity_cutter is not None:
+        if getattr(p, "pour_channel", False) and user_planes:
+            chan_note = ("the bottom-fill channel needs the standard split - it is left "
+                         "off with your own split planes")
+        elif getattr(p, "pour_channel", False) and cavity_cutter is not None:
             if parting is None and not multipart:
                 parting = split.parting_surface(
                     mold, shape_ref, axis, p, coll,
@@ -583,8 +677,24 @@ def _build_once(master, props, trim_ok=False):
         if chan is not None:
             channel.bore_channel(mold, chan, coll)
 
+        # Inner cores: the user's marked core meshes become core parts, with
+        # their pocket and stem channel cut in the mold (a direct mold), or
+        # carried on the positive with a hole through the shell (a pour box).
+        core_parts, core_notes = [], []
+        for k, src in enumerate(mfcores.user_cores(coll, home, k), start=1):
+            try:
+                part, note = mfcores.build_core(
+                    src, positive, mold, p, coll, k, p.box_style == 'POUR_BOX',
+                    positive=positive if p.box_style == 'POUR_BOX' else None)
+            finally:
+                util.remove_object(src)
+            if part is not None:
+                core_parts.append(part)
+            core_notes.append(note)
+
 
         yield (0.86, "shaping the base")
+        skin_note = ""
         plate = None
         cup = None
         rim = None                        # Open bottom: where the formers' legs sit
@@ -614,7 +724,15 @@ def _build_once(master, props, trim_ok=False):
                     min_floor=build.screw_floor(p) if screw_on else 0.0,
                     pocket_src=positive)
                 open_z = plate.get("mf_plate_top", util.world_bbox(work)[0].z)
-                if screw_on:
+                if getattr(p, "skin_core", False):
+                    # Skin mold: the core stands on the plate, the skin is cast
+                    # in the gap between it and the mold.
+                    skin_ok, skin_note, core_vol = build.build_skin_core(
+                        plate, positive, p.skin_thickness, p, coll)
+                    if skin_ok:
+                        plate.name = "MF_SkinCore"
+                        cavity_volume = max(cavity_volume - core_vol, 0.0)
+                elif screw_on:
                     # Screw the master to the plate instead of gluing it.
                     screw = build.add_plate_screw(plate, positive, p, coll)
             else:
@@ -698,9 +816,18 @@ def _build_once(master, props, trim_ok=False):
                 else:
                     out_dir = Vector((0.0, 0.0, 0.0))
                     out_dir[{'X': 0, 'Y': 1}.get(axis, 0)] = 1.0
-                if lines:
-                    _ok, label_note = mflabel.add_label(mold, shape_ref, label_cav,
-                                                      out_dir, lines, p, coll)
+                logo, imported = _label_logo(p, coll)
+                try:
+                    if lines or logo is not None:
+                        _ok, label_note = mflabel.add_label(mold, shape_ref, label_cav,
+                                                          out_dir, lines, p, coll,
+                                                          logo=logo)
+                finally:
+                    for o in imported + ([logo] if logo is not None else []):
+                        try:
+                            util.remove_object(o)
+                        except Exception:
+                            pass
             except Exception as exc:
                 label_note = f"label skipped ({exc})"
         if label_cav is not None:
@@ -714,9 +841,18 @@ def _build_once(master, props, trim_ok=False):
         _scap = (_smx[_sai] - _smn[_sai]) * 0.4
         seam_flat = (_smn[_sai] + _smx[_sai]) * 0.5 + max(
             min(getattr(p, "split_offset", 0.0), _scap), -_scap)
-        parts = split.split_parts(mold, shape_ref, axis, p, coll, key_wall,
-                                  radial_center=radial_center,
-                                  wing_bolt_zs=wing_bolt_zs, parting=parting)
+        if user_planes:
+            parts, plane_keys = mfplanes.cut_by_planes(
+                mold, user_planes, p, coll, key_wall,
+                keys=not (p.wings and p.box_style == 'POUR_BOX'))
+            planes_note = (f"cut along your {len(user_planes)} split plane"
+                           f"{'s' if len(user_planes) != 1 else ''} into {len(parts)} pieces"
+                           + (f", {plane_bolts} bolt holes" if plane_bolts else "")
+                           + (f", {plane_keys} alignment keys" if plane_keys else ""))
+        else:
+            parts = split.split_parts(mold, shape_ref, axis, p, coll, key_wall,
+                                      radial_center=radial_center,
+                                      wing_bolt_zs=wing_bolt_zs, parting=parting)
         if parting is not None and parting.used is False and wing_bolt_zs is not None:
             build.wing_note(p, "the contoured parting did not cut cleanly and fell "
                                "back to a flat cut, so the clamp wings may be split "
@@ -755,6 +891,7 @@ def _build_once(master, props, trim_ok=False):
             except Exception:
                 pass                          # cosmetic pass - never fail a build
 
+        parts.extend(core_parts)             # inner cores: validated/moved/exported too
         if plate is not None:
             parts.append(plate)              # validated/moved/exported like any part
         if lock_base_part is not None:
@@ -768,11 +905,12 @@ def _build_once(master, props, trim_ok=False):
         # facets in the STL). Weld them shut before the parts are checked.
         for part in parts:
             util.fix_folded_faces(part)
+            util.weld_zero_edges(part)       # zero-area slivers (Blender 5.2)
 
         trimmed = False
         split_notes = []
         checked = []
-        for label, part in zip("ABCDEFGH", parts):
+        for label, part in zip(string.ascii_uppercase, parts):
             ok, reason = util.part_is_valid(part)
             if not ok and "disconnected" in reason and not multipart:
                 # A flat cut through a model that curves away from it can leave
@@ -785,11 +923,15 @@ def _build_once(master, props, trim_ok=False):
                     ok, reason = True, ""
                     trimmed = trimmed or dropped > 0
                     if len(pieces) > 1:
+                        hint = ("tick Contoured (Split) so the seam follows the model, "
+                                "or try the other Split axis"
+                                if locking and not getattr(p, "contoured", True)
+                                else "try the other Split axis")
                         split_notes.append(
                             f"half {label} came out in {len(pieces)} pieces "
                             f"({', '.join(q.name for q in pieces)}): the model curves "
                             f"away from the parting at some height - print them all, or "
-                            f"try the other Split axis")
+                            f"{hint}")
                     checked.extend(pieces)
                     continue
             # Last resort: if a part lost a *minor* fragment (e.g. an open-bottom rim
@@ -983,6 +1125,10 @@ def _build_once(master, props, trim_ok=False):
                 for q in pos_parts)),
             "trimmed": trimmed,
             "split_notes": split_notes,
+            "bottom_note": bottom_note,
+            "planes_note": planes_note,
+            "skin_note": skin_note,
+            "core_notes": core_notes,
             "undercut": undercut,
             "axis": axis,
         }
@@ -1033,90 +1179,18 @@ def _orient_tray(work, up):
             work.data.update()
 
 
-def _svg_curves(path):
-    """Import an SVG and return its curve objects (best effort across bundled
-    importer states)."""
-    before = set(bpy.data.objects)
-    try:
-        bpy.ops.import_curve.svg(filepath=path)
-    except Exception:
-        try:
-            import addon_utils
-            addon_utils.enable("io_curve_svg")
-            bpy.ops.import_curve.svg(filepath=path)
-        except Exception as exc:
-            raise ValueError(f"Could not import the SVG: {exc}")
-    new = [o for o in bpy.data.objects if o not in before and o.type == 'CURVE']
-    if not new:
-        raise ValueError("The SVG imported no curves - export the artwork with "
-                         "FILLED paths (in Inkscape: select all, Path > "
-                         "Object to Path, and Stroke to Path for outlines).")
-    return new
-
-
-def _design_to_solid(sources, thickness, coll):
-    """Fill + extrude Curve/Text objects into ONE mesh solid of ``thickness``
-    (centred on z=0), consuming nothing (works on evaluated copies)."""
-    deps = bpy.context.evaluated_depsgraph_get()
-    solid = None
-    half = thickness * 0.5
-    for src in sources:
-        if src.type not in ('CURVE', 'FONT'):
-            continue
-        dup = src.copy()
-        dup.data = src.data.copy()
-        coll.objects.link(dup)
-        if src.type == 'CURVE':
-            try:
-                dup.data.dimensions = '2D'
-                dup.data.fill_mode = 'BOTH'
-            except Exception:
-                pass
-        dup.data.extrude = half
-        dup.data.bevel_depth = 0.0
-        deps = bpy.context.evaluated_depsgraph_get()
-        me = bpy.data.meshes.new_from_object(
-            dup.evaluated_get(deps), preserve_all_data_layers=False, depsgraph=deps)
-        util.remove_object(dup)
-        if not me.polygons:
-            bpy.data.meshes.remove(me)
-            continue
-        me.transform(src.matrix_world)      # bake the source transform in place -
-        ob = bpy.data.objects.new("MF_StampRelief", me)   # NEVER recentre per
-        coll.objects.link(ob)               # shape (that piles an SVG's shapes
-        if solid is None:                   # on top of each other)
-            solid = ob
-            solid.name = "MF_StampRelief"
-        else:
-            util.join_meshes(solid, ob)
-    if solid is None:
-        raise ValueError("The design has no filled area to engrave - use FILLED "
-                         "shapes (a Text object, or an SVG with filled paths).")
-    # Curve-to-mesh leaves the extrusion CAPS as separate faces duplicating the
-    # wall vertices (6 islands, hundreds of non-manifold edges on a 2-shape
-    # SVG): weld the duplicates into one closed shell per shape.
-    import bmesh as _bmesh
-    bm = _bmesh.new()
-    bm.from_mesh(solid.data)
-    _bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=1e-5)
-    _bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
-    bm.to_mesh(solid.data)
-    bm.free()
-    # SVG curves often import with reversed winding; an inside-out solid used as
-    # a boolean cutter consumes the whole pan. Make every shell face outward.
-    meshprep.ensure_outward_normals(solid)
-    # Auto-flatten: an imported SVG often carries a baked -90 degree X rotation
-    # (and wild scales), leaving the design standing VERTICALLY - the engrave
-    # would be garbage. The extrusion axis is the one whose extent matches the
-    # known cutter thickness; rotate it onto Z.
-    fmn, fmx = util.world_bbox(solid)
-    ext = (fmx.x - fmn.x, fmx.y - fmn.y, fmx.z - fmn.z)
-    thin = min(range(3), key=lambda i: abs(ext[i] - thickness))
-    if thin == 0:
-        solid.data.transform(Matrix.Rotation(math.radians(90.0), 4, 'Y'))
-    elif thin == 1:
-        solid.data.transform(Matrix.Rotation(math.radians(90.0), 4, 'X'))
-    return solid
+def _label_logo(p, coll):
+    """The label's logo as a flat solid (``label.logo_solid``) from the chosen
+    Curve/Text object, or else the SVG file: ``(logo or None, imported
+    objects to remove)``."""
+    obj = getattr(p, "label_logo_obj", None)
+    if obj is not None and getattr(obj, "type", None) in ('CURVE', 'FONT'):
+        return mflabel.logo_solid([obj], coll), []
+    path = bpy.path.abspath(getattr(p, "label_logo", "") or "")
+    if not path:
+        return None, []
+    imported = _svg_curves(path)
+    return mflabel.logo_solid(imported, coll), imported
 
 
 def _build_stamp(design, props):
@@ -1201,7 +1275,8 @@ def _build_tray(master, props):
     Generator: yields ``(fraction, label)`` and returns the result dict."""
     _validate_master(master)
     omn, omx = util.world_bbox(master)
-    home = (omn + omx) * 0.5
+    k = _build_scale(props)
+    home = (omn + omx) * 0.5 * k          # build space is in millimetres
 
     coll = util.ensure_collection()
     for obj in list(coll.objects):
@@ -1209,6 +1284,7 @@ def _build_tray(master, props):
             util.remove_object(obj)
 
     work = util.duplicate_object(master, "MF_Positive", coll)
+    _into_mm(work, k)
     try:
         yield (0.10, "preparing mesh")
         if props.heal:
@@ -1235,12 +1311,19 @@ def _build_tray(master, props):
         if not ok:
             raise MoldGeometryError(f"Generated tray {reason}.")
 
-        for o in (work, pan):
+        frame = info.get("frame")
+        tray_note = ""
+        if getattr(props, "tray_removable", False):
+            tray_note = ("the walls lift off: MF_Mold_B is the frame, seated in a groove "
+                         "round the floor" if frame is not None else
+                         "the walls could not be cut off cleanly - the tray is one piece")
+        for o in (work, pan) + ((frame,) if frame is not None else ()):
             o.location = home
         _try_hide(work)       # fused into the pan already - reference only
         _try_hide(master)     # the original would overlap the pan
         return {
-            "parts": [pan],
+            "parts": [pan] + ([frame] if frame is not None else []),
+            "tray_note": tray_note,
             "positive": work,
             "skin": None,
             "cavity_volume": info["cast_volume"],
@@ -1318,9 +1401,16 @@ def _prop_defaults():
 
 
 def _snapshot(props):
-    return types.SimpleNamespace(
+    ns = types.SimpleNamespace(
         **{k: getattr(props, k, d) for k, d in _prop_defaults().items()}
     )
+    # Set by units.build_props, not panel properties: a recovery attempt must
+    # build at the same scale, or it builds a model made in metres at a
+    # thousandth of its size and the result is shrunk again on the way out.
+    for extra in ("build_scale", "mm_per_unit"):
+        if hasattr(props, extra):
+            setattr(ns, extra, getattr(props, extra))
+    return ns
 
 
 def _derive_sizes(work, props):
@@ -1339,8 +1429,13 @@ def _derive_sizes(work, props):
     gap = wall
     offset = gap + (shell if is_jacket else 0.0)
 
+    # Skin mold: a direct mold with a printed core on the key plate - so an
+    # Open Bottom with the plate, whatever the bottom is set to.
+    skin = props.box_style == 'SOLID' and getattr(props, "skin_core", False)
     return types.SimpleNamespace(
         box_style=props.box_style,
+        skin_core=skin,
+        skin_thickness=max(getattr(props, "skin_thickness", 2.0), 0.4),
         block=(props.box_style == 'SOLID'
                and getattr(props, "solid_shape", 'HUG') == 'BLOCK'),
         skin_keys=getattr(props, "skin_keys", False),
@@ -1349,10 +1444,10 @@ def _derive_sizes(work, props):
         decimate_ratio=props.decimate_ratio,
         voxel_safe=props.voxel_safe,
         voxel_size=max(props.voxel_size, 0.05),
-        base_style=props.base_style,
+        base_style='OPEN' if skin else props.base_style,
         base_flange=getattr(props, "base_flange", True),
-        base_plate=getattr(props, "base_plate", False),
-        plate_screw=getattr(props, "plate_screw", False),
+        base_plate=True if skin else getattr(props, "base_plate", False),
+        plate_screw=False if skin else getattr(props, "plate_screw", False),
         screw_diameter=getattr(props, "screw_diameter", 3.4),
         screw_countersink=getattr(props, "screw_countersink", True),
         screw_head_diameter=getattr(props, "screw_head_diameter", 6.5),
@@ -1380,9 +1475,13 @@ def _derive_sizes(work, props):
         max_print_height=getattr(props, "max_print_height", 0.0),
         support_clearance=getattr(props, "support_clearance", 5.0),
         fit_positive=getattr(props, "fit_positive", True),
-        # A Locking Base's seam is flat through the plinth and its socket and
-        # contoured above (``parting_flat``, set once the split axis is known).
-        contoured=getattr(props, "contoured", True),
+        # A Locking Base has its own switch, off by default (one flat seam);
+        # on, its seam is flat through the plinth and its socket and contoured
+        # above (``parting_flat``, set once the split axis is known).
+        contoured=(getattr(props, "lock_contoured", False)
+                   if (props.base_style == 'LOCK' and props.box_style == 'POUR_BOX')
+                   else getattr(props, "contoured", True)),
+        lock_contoured=getattr(props, "lock_contoured", False),
         parting_flat=None,
         parting_blend=12.0,
         key_count=props.key_count,
@@ -1394,7 +1493,14 @@ def _derive_sizes(work, props):
         label_size=getattr(props, "label_size", 5.0),
         label_depth=getattr(props, "label_depth", 0.6),
         label_style=getattr(props, "label_style", 'CUT'),
+        label_logo=getattr(props, "label_logo", ""),
+        label_logo_obj=getattr(props, "label_logo_obj", None),
+        label_logo_size=getattr(props, "label_logo_size", 12.0),
+        use_split_planes=getattr(props, "use_split_planes", False),
+        core_pull=getattr(props, "core_pull", 'AUTO'),
+        core_stem=getattr(props, "core_stem", 0.0),
         mm_per_unit=getattr(props, "mm_per_unit", 1.0),
+        build_scale=getattr(props, "build_scale", 1.0),
         silicone_density=getattr(props, "silicone_density", 1.15),
         cast_density=getattr(props, "cast_density", 1.10),
         stand_legs=getattr(props, "stand_legs", False),

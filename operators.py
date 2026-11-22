@@ -2,6 +2,8 @@
 
 import os
 
+import math
+
 import bpy
 from mathutils import Vector
 from bpy.props import StringProperty
@@ -10,6 +12,25 @@ from .core import pipeline
 from .core import units
 from .core import export as mf_export
 from .core import util as mf_util
+
+
+def _read_metres_if_tiny(op, context, master):
+    """A model under 1 mm by the 1 unit = 1 mm convention was made in metres:
+    in Blender's untouched default scene, read the scene in metres (Length in
+    millimetres) so the mold fits it, and say so. With no unit system (chosen
+    on purpose) only warn."""
+    if not units.looks_like_metres(context.scene, master):
+        return
+    big = units.world_size(master)
+    if context.scene.unit_settings.system == 'NONE':
+        op.report({'WARNING'}, f"{master.name} is {big:.3g} units across - under 1 mm "
+                               f"with no unit system. If it was made in metres, press "
+                               f"'My model is in metres' in the panel")
+        return
+    units.read_as_metres(context.scene)
+    op.report({'INFO'}, f"{master.name} is {big:.3g} units across: made in metres. "
+                        f"Scene Units > Length is now Millimeters, so it reads "
+                        f"{big * 1000:.0f} mm and the mold fits it")
 
 
 class _BuildOperator:
@@ -28,6 +49,7 @@ class _BuildOperator:
         props = context.scene.moldforge
         master = self._master(context)
         _remember_master(props, master)
+        _read_metres_if_tiny(self, context, master)
         try:
             # Size fields are millimetres; convert to Blender units for this scene.
             work = units.build_props(props, context.scene)
@@ -43,6 +65,7 @@ class _BuildOperator:
         props = context.scene.moldforge
         master = self._master(context)
         _remember_master(props, master)
+        _read_metres_if_tiny(self, context, master)
         for warning in pipeline.prebuild_warnings(master, props):
             self.report({'WARNING'}, warning)
         # Size fields are millimetres; convert to Blender units for this scene.
@@ -183,6 +206,15 @@ class _BuildOperator:
             summary += f" {note[0].upper()}{note[1:]}." if note else ""
 
         notes = []
+        notes.extend(result.get("core_notes") or [])
+        if result.get("skin_note"):
+            notes.append(result["skin_note"])
+        if result.get("tray_note"):
+            notes.append(result["tray_note"])
+        if result.get("planes_note"):
+            notes.append(result["planes_note"])
+        if result.get("bottom_note"):
+            notes.append(result["bottom_note"])
         if result.get("channel_note"):
             notes.append(result["channel_note"])
         if ((result.get("legs_note") or "").startswith("stand legs skipped")
@@ -255,7 +287,7 @@ class _BuildOperator:
                 to_export.extend(result.get("positive_parts")   # prints too (see button)
                                  or ([result["positive"]] if result.get("positive")
                                      else []))
-                written = mf_export.export_objects(to_export, directory)
+                written = mf_export.export_objects(to_export, directory, mpu)   # mm
                 summary += f" Exported {len(written)} part(s)."
             except Exception as exc:  # the mold built fine; don't fail on export
                 notes.append(f"export failed: {getattr(exc, 'strerror', None) or exc}")
@@ -321,6 +353,165 @@ class MOLDFORGE_OT_regenerate(_BuildOperator, bpy.types.Operator):
         return last_master(context)
 
 
+class MOLDFORGE_OT_read_as_metres(bpy.types.Operator):
+    """Your model was made in metres (it reads as under a millimetre): set Scene
+    Units to Metric, Unit Scale 1.0, Length Millimeters, so Blender and
+    MoldForge both read 1 unit as 1 metre, shown in millimetres. Nothing in the
+    scene changes size"""
+    bl_idname = "moldforge.read_as_metres"
+    bl_label = "My Model Is in Metres"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        units.read_as_metres(context.scene)
+        obj = context.active_object
+        if obj is not None and obj.type == 'MESH':
+            mn, mx = mf_util.world_bbox(obj)
+            d = (mx - mn) * 1000.0
+            self.report({'INFO'}, f"{obj.name} reads {d.x:.0f} × {d.y:.0f} × {d.z:.0f} mm")
+        return {'FINISHED'}
+
+
+class MOLDFORGE_OT_fix_bottom(bpy.types.Operator):
+    """Rebuild the selected model's flat bottom as an even triangle mesh and
+    level it (within 0.3 mm). A boolean cut leaves the bottom as one face of
+    needle-thin triangles, which later booleans struggle to cut through"""
+    bl_idname = "moldforge.fix_bottom"
+    bl_label = "Fix Flat Bottom"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and obj.type == 'MESH'
+                and not obj.name.startswith(("MF_", "Kept_MF_")))
+
+    def execute(self, context):
+        from .core import meshprep
+        obj = context.active_object
+        if obj.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        fixed, note = meshprep.fix_flat_bottom(
+            obj, scale=units.mm_per_unit(context.scene))       # its tolerances are mm
+        if fixed:
+            self.report({'INFO'}, note[0].upper() + note[1:])
+            return {'FINISHED'}
+        self.report({'WARNING'}, (note[0].upper() + note[1:]) if note else
+                    "No flat bottom found: nothing faces straight down at the "
+                    "model's lowest point")
+        return {'CANCELLED'}
+
+
+class MOLDFORGE_OT_add_split_plane(bpy.types.Operator):
+    """Add a split plane through the selected model (or at the 3D cursor). Move
+    and rotate it to where the mold should come apart; add as many as you like.
+    Generate cuts along them when Split with My Planes is on"""
+    bl_idname = "moldforge.add_split_plane"
+    bl_label = "Add Split Plane"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import bmesh
+        from .core import planes as mf_planes
+        obj = context.active_object
+        upm = units.units_per_mm(context.scene)      # sizes below are in mm
+        if obj is not None and obj.type == 'MESH' and not obj.name.startswith("MF_"):
+            mn, mx = mf_util.world_bbox(obj)
+            centre, size = (mn + mx) * 0.5, max((mx - mn).length, 10.0 * upm) * 0.8
+        else:
+            centre, size = context.scene.cursor.location.copy(), 100.0 * upm
+        coll = bpy.data.collections.get(mf_util.MARKER_COLLECTION)
+        if coll is None:
+            coll = bpy.data.collections.new(mf_util.MARKER_COLLECTION)
+        root = context.scene.collection
+        if coll.name not in root.children:
+            try:
+                root.children.link(coll)
+            except RuntimeError:
+                pass
+        bm = bmesh.new()
+        bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=size * 0.5)
+        me = bpy.data.meshes.new(mf_planes.PREFIX)
+        bm.to_mesh(me)
+        bm.free()
+        pl = bpy.data.objects.new(mf_planes.PREFIX, me)
+        pl.location = centre
+        pl.rotation_euler = (0.0, math.radians(90.0), 0.0)   # upright, cutting across X
+        pl.display_type = 'WIRE'
+        pl.show_in_front = True
+        pl.hide_render = True
+        coll.objects.link(pl)
+        try:
+            for o in context.selected_objects:
+                o.select_set(False)
+            pl.select_set(True)
+            context.view_layer.objects.active = pl
+        except RuntimeError:
+            pass
+        context.scene.moldforge.use_split_planes = True
+        self.report({'INFO'}, "Split plane added - move (G) and rotate (R) it, then "
+                              "Generate")
+        return {'FINISHED'}
+
+
+class MOLDFORGE_OT_mark_core(bpy.types.Operator):
+    """Use the selected mesh(es) as inner cores: model each core as its own
+    mesh (a cylinder in a blind hole, the shape of an undercut pocket), select
+    it and click. Generate turns it into a removable core part with a stem out
+    through the mold wall"""
+    bl_idname = "moldforge.mark_core"
+    bl_label = "Mark as Core"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' and not o.name.startswith("MF_")
+                   for o in context.selected_objects)
+
+    def invoke(self, context, event):
+        names = ", ".join(o.name for o in self._picked(context)[:3])
+        return context.window_manager.invoke_confirm(
+            self, event, title="Mark as Inner Core",
+            message=f"Use {names} as an inner core (not as the model)?")
+
+    @staticmethod
+    def _picked(context):
+        """The selected meshes that can be cores - never the model the last
+        Generate built from."""
+        master = getattr(context.scene.moldforge, "last_master", "")
+        return [o for o in context.selected_objects
+                if o.type == 'MESH' and not o.name.startswith("MF_") and o.name != master]
+
+    def execute(self, context):
+        from .core import cores as mf_cores
+        if not self._picked(context):
+            self.report({'WARNING'}, "That is the model you build the mold from - select "
+                                     "the core mesh you modelled instead")
+            return {'CANCELLED'}
+        coll = bpy.data.collections.get(mf_util.MARKER_COLLECTION)
+        if coll is None:
+            coll = bpy.data.collections.new(mf_util.MARKER_COLLECTION)
+        root = context.scene.collection
+        if coll.name not in root.children:
+            try:
+                root.children.link(coll)
+            except RuntimeError:
+                pass
+        n = 0
+        for o in self._picked(context):
+            for c in list(o.users_collection):
+                c.objects.unlink(o)
+            coll.objects.link(o)
+            o.name = mf_cores.PREFIX
+            o.display_type = 'WIRE'
+            o.show_in_front = True
+            o.hide_render = True
+            n += 1
+        self.report({'INFO'}, f"{n} core{'s' if n != 1 else ''} marked - Generate makes "
+                              f"the core parts")
+        return {'FINISHED'}
+
+
 class MOLDFORGE_OT_toggle_master(bpy.types.Operator):
     """Show or hide the original model the mold was built from (it is hidden
     after Generate so the printable positive is what you see)"""
@@ -357,7 +548,7 @@ def _add_marker(context, base_name, draw_type):
             pass
     em = bpy.data.objects.new(base_name, None)
     em.empty_display_type = draw_type
-    em.empty_display_size = 4.0
+    em.empty_display_size = 4.0 * units.units_per_mm(context.scene)     # 4 mm
     em.location = context.scene.cursor.location.copy()
     coll.objects.link(em)
     try:
@@ -467,7 +658,7 @@ class MOLDFORGE_OT_explode(bpy.types.Operator):
 
         row = sorted(objs, key=lambda o: (_rank(o.name), o.name))
         widths = [boxes[o.name][1].x - boxes[o.name][0].x for o in row]
-        gap = max(0.12 * max(widths), 10.0)
+        gap = max(0.12 * max(widths), 10.0 * units.units_per_mm(context.scene))
         total = sum(widths) + gap * (len(row) - 1)
 
         x = anchor.x - total * 0.5
@@ -514,7 +705,8 @@ class MOLDFORGE_OT_export(bpy.types.Operator):
             return {'CANCELLED'}
 
         try:
-            written = mf_export.export_objects(parts, directory)
+            written = mf_export.export_objects(
+                parts, directory, units.mm_per_unit(context.scene))   # STL in mm
         except Exception as exc:
             self.report({'ERROR'}, f"Export failed: {getattr(exc, 'strerror', None) or exc}")
             return {'CANCELLED'}
