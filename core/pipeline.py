@@ -720,8 +720,7 @@ def _build_once(master, props, trim_ok=False):
                                   radial_center=radial_center,
                                   wing_bolt_zs=wing_bolt_zs, parting=parting,
                                   wing_offset=_offset(p),
-                                  # radial wing keys stay off the channel's seam
-                                  wing_skip=(0,) if chan is not None else ())
+                                  wing_skip=_wing_key_skip(chan))
         if parting is not None and parting.used is False and wing_bolt_zs is not None:
             build.wing_note(p, "the contoured parting did not cut cleanly and fell "
                                "back to a flat cut, so the clamp wings may be split "
@@ -1279,6 +1278,18 @@ def _build_tray(master, props):
             if obj.name.startswith("MF_"):
                 util.remove_object(obj)
         raise
+
+
+def _wing_key_skip(chan):
+    """Where the wing alignment keys must stay off: the bottom-fill channel's
+    pipe runs up its seam (radial: the first seam) or its side of the wing (two
+    pieces), and a key there would sit on the pipe."""
+    if chan is None:
+        return ()
+    fr = chan["frame"]
+    if fr.multipart:
+        return (0,)
+    return (1.0 if fr.d[fr.h] > 0 else -1.0,)
 
 
 def _offset(props):

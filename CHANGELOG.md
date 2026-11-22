@@ -4,6 +4,10 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+- **Fixed: wing alignment keys on the bottom-fill channel's pipe.** On a
+  2-piece mold the keys were placed up both sides of the clamp wing, including
+  the side the channel's pipe runs up, so cones stood on the pipe. That side
+  is now left bare (radial molds already kept off the channel's seam).
 - **Fixed: exported STLs with non-manifold edges and inverted, doubled
   triangles** on parts Blender reported as watertight. An STL joins triangles
   wherever their corners share a position, so two vertices at one spot (some

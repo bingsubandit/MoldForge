@@ -29,12 +29,14 @@ def split_parts(mold, master, axis, props, coll, wall, radial_center=None,
     shift the mold's bounding box, so re-deriving the centre would miss them).
     ``wing_bolt_zs`` is the bolt heights the 2-part wings drilled (None = no wings) —
     the wing alignment keys are placed between them. ``wing_offset`` (the mold
-    wall's offset from the model) and ``wing_skip`` (seams to leave alone) steer
-    the radial wing keys."""
+    wall's offset from the model) steers the radial wing keys; ``wing_skip``
+    lists where the wing keys must stay off (the bottom-fill channel): radial
+    seam indices, or for two pieces the side (+1/-1 along the wing) it runs on."""
     n = max(int(getattr(props, "parts_count", 2)), 2)
     if n <= 2:
         half_a, half_b = split(mold, master, axis, props, coll, wall,
-                               wing_bolt_zs=wing_bolt_zs, parting=parting)
+                               wing_bolt_zs=wing_bolt_zs, parting=parting,
+                               wing_skip=wing_skip)
         return [half_a, half_b]
     return _split_radial(mold, master, props, coll, wall, n, center=radial_center,
                          wing_offset=wing_offset, wing_skip=wing_skip)
@@ -63,7 +65,8 @@ def _valid(obj):
     return util.part_is_valid(obj)[0]
 
 
-def split(mold, master, axis, props, coll, wall, wing_bolt_zs=None, parting=None):
+def split(mold, master, axis, props, coll, wall, wing_bolt_zs=None, parting=None,
+          wing_skip=()):
     """``parting`` (from ``parting_surface``, built before the clamp wings) is the
     contoured surface the wings were cut along: the halves are split on exactly
     that surface, so each half keeps its half of every wing."""
@@ -125,7 +128,7 @@ def split(mold, master, axis, props, coll, wall, wing_bolt_zs=None, parting=None
             and getattr(props, "wing_keys", 'NONE') != 'NONE'):
         _record_wing_keys(props, _add_wing_keys(
             half_a, half_b, props, axis, ai, mn, mx, coll, off, wing_bolt_zs,
-            parting=parting if contoured_used else None))
+            parting=parting if contoured_used else None, skip_sides=wing_skip))
 
     return half_a, half_b
 
@@ -618,7 +621,7 @@ def _seat_wing_key(keyed, mating, male, socket, coll):
 
 
 def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
-                   parting=None):
+                   parting=None, skip_sides=()):
     """Wing Alignment keys: a raised key on half_a's clamp-wing mating face seats into
     a matching socket in half_b, so the bolted halves can't shear sideways. Three
     shapes (the Wing Alignment option): CONE — a pointed pin, self-centering; DOME — a
@@ -628,7 +631,9 @@ def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
     dome becomes a wide spherical cap when the lip is shallow); its height comes from
     ``_wing_key_dims``. Keys are spread along the seam at the Key Spacing pitch,
     dodging the drilled bolt holes (``bolt_zs``); the socket is the same shape grown
-    by the Fit Clearance so printed parts actually seat. Best-effort with rollback: a
+    by the Fit Clearance so printed parts actually seat. ``skip_sides`` lists the
+    wing sides (+1/-1 along the wing) to leave bare: the bottom-fill channel's pipe
+    runs up that wing, and a key there would sit on it. Best-effort with rollback: a
     key that would leave either half invalid is skipped, never breaking a good mold."""
     dims = _wing_key_dims(props)
     if dims is None:
@@ -641,6 +646,8 @@ def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
 
     placed = 0
     for h_sign in (1.0, -1.0):
+        if any(h_sign * s > 0 for s in skip_sides):
+            continue
         for z in picks:
             # probe inside A's wing lip, on the parting surface (contoured or flat)
             found = wing_tip(half_a, parting, center, z, h_sign, reach, seam, ai, h,

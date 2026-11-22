@@ -2496,6 +2496,54 @@ def main():
     finally:
         mfchan.bore_channel = real_bore_c
 
+    # Wing alignment keys and the channel (user report): the channel's pipe runs up
+    # one side of the clamp wing, and the keys were placed on it anyway - cones
+    # standing on the pipe. A key must never overlap the pipe; the other side of
+    # the wing still gets its keys. Radial molds keep them off the channel's seam.
+    print("\n=== Wing keys stay off the bottom-fill channel ===")
+    from moldforge.core import channel as mfchan_k
+    real_bore_k = mfchan_k.bore_channel
+    real_seat = split._seat_wing_key
+    for n_parts in (2, 3):
+        seen_k = {"keys": []}
+
+        def _spy_bore_k(mold, geo, coll):
+            fr = geo["frame"]
+            seen_k["axis"] = fr.point(geo["t_pipe"], geo["gate_z"])
+            seen_k["tube_r"] = geo["bore_r"] + max(2.0, 1.6)   # bore + shell wall
+            return real_bore_k(mold, geo, coll)
+
+        def _spy_seat(keyed, mating, male, socket, coll):
+            kmn, kmx = mfutil.world_bbox(male)
+            ok_ = real_seat(keyed, mating, male, socket, coll)
+            if ok_:
+                c_ = (kmn + kmx) * 0.5
+                seen_k["keys"].append((c_, max(kmx.x - kmn.x, kmx.y - kmn.y) * 0.5))
+            return ok_
+
+        mfchan_k.bore_channel = _spy_bore_k
+        split._seat_wing_key = _spy_seat
+        try:
+            reset_scene()
+            rk_ = pipeline.build_mold_system(make_master("Model"), _over(
+                default_props(), box_style='POUR_BOX', base_style='OPEN', wings=True,
+                pour_channel=True, wing_keys='CONE', parts_count=n_parts,
+                sprue=False, vent_count=0))
+        finally:
+            mfchan_k.bore_channel = real_bore_k
+            split._seat_wing_key = real_seat
+        ax = seen_k.get("axis")
+        clash = []
+        for c_, r_ in seen_k["keys"]:
+            dxy = math.hypot(c_.x - ax.x, c_.y - ax.y) if ax is not None else 1e9
+            if dxy < seen_k["tube_r"] + r_:
+                clash.append(round(dxy, 1))
+        check(rk_.get("channel") and all(mfutil.part_is_valid(q)[0] for q in rk_["parts"]),
+              f"{n_parts} pieces, channel + cone wing keys: valid parts")
+        check(not clash and len(seen_k["keys"]) > 0,
+              f"{n_parts} pieces: {len(seen_k['keys'])} wing keys, none on the channel's "
+              f"pipe (keys within reach of it: {clash or 'none'})")
+
     # --- Label on the case (review request): the weights, debossed.
     print("\n=== Label on the case ===")
     from moldforge.core import label as mflabel_t
