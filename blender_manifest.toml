@@ -28,6 +28,8 @@ paths_exclude_pattern = [
   "tests/",
   "site/",
   "/.gitignore",
+  "/AGENTS.md",
+  "/CLAUDE.md",
   "/*.stl",
   "/*.obj",
   "/*.fbx",
