@@ -900,9 +900,9 @@ class MOLDFORGE_PT_mesh(_MFSub, bpy.types.Panel):
         props = context.scene.moldforge
         bits = []
         if props.decimate:
-            bits.append(f"decimate {props.decimate_ratio:g}")
+            bits.append(f"reduce to {props.decimate_ratio:g}")
         if props.voxel_safe:
-            bits.append(f"remesh {props.voxel_size:g}")
+            bits.append(f"rebuild {props.voxel_size:g}")
         if props.mold_detail != 1.0:
             bits.append(f"detail {props.mold_detail:g}x")
         self._summary(self.layout, " · ".join(bits))
@@ -910,16 +910,21 @@ class MOLDFORGE_PT_mesh(_MFSub, bpy.types.Panel):
     def draw(self, context):
         layout = self._body()
         props = context.scene.moldforge
-        layout.prop(props, "heal", text="Heal mesh")
+        layout.prop(props, "heal", text="Clean up model")
+        sub = layout.column()
+        sub.active = props.heal
+        sub.label(text="Welds, fills small holes, drops stray bits", icon='INFO')
         layout.prop(props, "fix_bottom", text="Fix flat bottom")
-        layout.operator("moldforge.fix_bottom", text="Fix Model's Flat Bottom",
-                        icon='MOD_TRIANGULATE')
-        layout.prop(props, "decimate", text="Decimate")
+        layout.operator("moldforge.clean_model", text="Clean Up Model Now",
+                        icon='BRUSH_DATA')
+        layout.separator()
+        layout.prop(props, "decimate", text="Reduce polygons")
         if props.decimate:
-            layout.prop(props, "decimate_ratio", text="Ratio")
-        layout.prop(props, "voxel_safe", text="Safe remesh")
+            layout.prop(props, "decimate_ratio", text="Keep")
+        layout.prop(props, "voxel_safe", text="Rebuild as solid (remesh)")
         if props.voxel_safe:
             layout.prop(props, "voxel_size", text="Voxel size")
+            layout.label(text="Softens detail finer than the voxel", icon='INFO')
         layout.prop(props, "mold_detail", text="Mold detail")
 
 

@@ -309,6 +309,45 @@ def make_bell_master(name="Model", r0=30.0, r1=22.0, h=90.0, wobble=1.5,
     return o
 
 
+def make_messy_master(name="Model", open_bottom=False):
+    """A bell with the faults a downloaded STL carries: specks and stray single
+    triangles floating by it (the user's fairy house had 16), a face doubled,
+    a seam never welded, and a 14-edge hole - more than the 12 edges upstream's
+    hole closing takes, but small. ``open_bottom`` also removes the bottom cap:
+    a big opening the clean-up must leave alone."""
+    o = make_bell_master(name, seg=96, rows=60, wobble=0.8)
+    bm = bmesh.new()
+    bm.from_mesh(o.data)
+    bm.faces.ensure_lookup_table()
+    side = [f for f in bm.faces if len(f.verts) == 4]
+    if open_bottom:
+        bmesh.ops.delete(bm, geom=[max(bm.faces, key=lambda f: len(f.verts)
+                                       if f.calc_center_median().z < 1 else 0)],
+                         context='FACES_ONLY')
+    # the hole: a 2 x 5 block of quads half-way up
+    rows, seg = 60, 96
+    block = [side[j * seg + i] for j in (20, 21) for i in range(10, 15)]
+    # a seam never welded: split the edges up one column of quads
+    seam = [e for j in range(30, 40) for e in side[j * seg + 40].edges
+            if abs(e.verts[0].co.z - e.verts[1].co.z) > 0.5
+            and min(v.index for v in e.verts) % seg == 41 % seg]
+    dup_src = side[45 * seg + 70]
+    bmesh.ops.delete(bm, geom=block, context='FACES_ONLY')
+    bmesh.ops.split_edges(bm, edges=seam)
+    bmesh.ops.duplicate(bm, geom=[dup_src])          # an exact double of one face
+    for k in range(5):                                # closed specks
+        bmesh.ops.create_icosphere(bm, subdivisions=1, radius=0.05,
+                                   matrix=Matrix.Translation((40 + k, 0, 10)))
+    for k in range(4):                                # stray single triangles
+        vs = [bm.verts.new((45 + k + d[0], 5 + d[1], 20)) for d in
+              ((0, 0), (0.05, 0), (0, 0.05))]
+        bm.faces.new(vs)
+    bm.to_mesh(o.data)
+    bm.free()
+    o.data.update()
+    return o
+
+
 def make_multi_island_master():
     bm = bmesh.new()
     bmesh.ops.create_icosphere(bm, subdivisions=3, radius=6, matrix=Matrix.Translation((-9, 0, 0)))
@@ -745,7 +784,8 @@ def main():
         return m
 
     md_kw = dict(box_style='POUR_BOX', base_style='FOLLOW', wings=True, sprue=False,
-                 vent_count=0, split_axis='X', wing_keys='NONE')
+                 vent_count=0, split_axis='X', wing_keys='NONE',
+                 heal=False)    # keep the hole: Clean Up would fill it
     md = {}
     for level in (1.0, 2.0):
         reset_scene()
@@ -2588,6 +2628,60 @@ def main():
         check(not clash and len(seen_k["keys"]) > 0,
               f"{n_parts} pieces: {len(seen_k['keys'])} wing keys, none on the channel's "
               f"pipe (keys within reach of it: {clash or 'none'})")
+
+    # The user's fairy house: 16 specks and stray triangles floating by an
+    # otherwise watertight model. Heal used to run only on a model that was
+    # already watertight, so it never saw them; the build remeshed its working
+    # copy, and the positive (snapshotted before that) kept every fragment.
+    print("\n=== Clean Up Model repairs the source mesh ===")
+    from moldforge.core import meshprep
+    reset_scene()
+    mm_ = make_messy_master("Messy")
+    c_, note_c = meshprep.clean_model(mm_)
+    check(mfutil.island_count(mm_) == 1 and mfutil.nonmanifold_count(mm_) == 0,
+          f"clean_model makes the messy bell one watertight piece "
+          f"({mfutil.island_count(mm_)} pieces, {mfutil.nonmanifold_count(mm_)} open edges)")
+    check(c_["fragments"] == 9 and c_["holes"] == 1 and c_["welded"] > 0
+          and "9 stray fragment" in note_c,
+          f"... dropping 9 fragments, filling the 14-edge hole, welding the seam ({c_})")
+    reset_scene()
+    mo_ = make_messy_master("MessyOpen", open_bottom=True)
+    meshprep.clean_model(mo_)
+    check(mfutil.island_count(mo_) == 1 and mfutil.nonmanifold_count(mo_) == 96,
+          f"... and leaves a big opening (the open bottom's 96 edges) open "
+          f"({mfutil.nonmanifold_count(mo_)} open edges)")
+
+    remeshed_ = []
+    real_vr = meshprep.voxel_remesh
+
+    def _spy_vr(obj, size):
+        remeshed_.append(obj.name)
+        return real_vr(obj, size)
+    meshprep.voxel_remesh = _spy_vr
+    try:
+        reset_scene()
+        rc_ = pipeline.build_mold_system(make_messy_master("Messy"), _over(
+            default_props(), box_style='POUR_BOX', base_style='OPEN', wings=True,
+            parts_count=2, vent_count=0))
+    finally:
+        meshprep.voxel_remesh = real_vr
+    pos_ = rc_["positive"]
+    check(all(mfutil.part_is_valid(q)[0] for q in rc_["parts"])
+          and mfutil.island_count(pos_) == 1 and mfutil.nonmanifold_count(pos_) == 0,
+          f"a messy model builds, and its positive is clean ({mfutil.island_count(pos_)} "
+          f"pieces, {mfutil.nonmanifold_count(pos_)} open edges)")
+    check(not any(n_.startswith("MF_Positive") for n_ in remeshed_)
+          and "cleaned up the model" in (rc_.get("bottom_note") or ""),
+          f"... at full detail: the repaired model isn't auto-remeshed "
+          f"(remeshed: {remeshed_ or 'nothing'}; note {rc_.get('bottom_note')!r})")
+
+    reset_scene()
+    mb_ = make_messy_master("MessyOp")
+    bpy.context.view_layer.objects.active = mb_
+    op_ = bpy.ops.moldforge.clean_model()
+    check(op_ == {'FINISHED'} and mfutil.island_count(mb_) == 1
+          and mfutil.nonmanifold_count(mb_) == 0,
+          f"Clean Up Model Now repairs the model itself ({op_})")
 
     # --- Label on the case (review request): the weights, debossed.
     print("\n=== Label on the case ===")

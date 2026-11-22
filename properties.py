@@ -849,8 +849,13 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
 
     # --- Mesh prep ------------------------------------------------------ #
     heal: BoolProperty(
-        name="Heal Mesh",
-        description="Merge doubles, drop loose geometry and recalculate normals first",
+        name="Clean Up Model",
+        description="Repair the model before the build (on Generate's working copy; "
+                    "Clean Up Model Now does it to your model): weld doubled "
+                    "vertices, delete zero-area, duplicate and loose faces and edges, "
+                    "drop tiny stray fragments, fill small holes and point every face "
+                    "outward. A model it makes watertight builds at full detail "
+                    "instead of being auto-remeshed. Big openings are left open",
         default=True,
     )
     fix_bottom: BoolProperty(
@@ -858,18 +863,30 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
         description="When the model's flat bottom is badly meshed - one face of "
                     "needle-thin triangles, as a boolean cut leaves it - rebuild it as "
                     "an even mesh on Generate's working copy (your model is not "
-                    "changed; the Fix Flat Bottom button fixes the model itself)",
+                    "changed; Clean Up Model Now fixes the model itself)",
         default=True,
     )
-    decimate: BoolProperty(name="Decimate", default=False)
-    decimate_ratio: FloatProperty(name="Ratio", default=0.5, min=0.1, max=1.0, subtype='FACTOR')
+    decimate: BoolProperty(
+        name="Reduce Polygons",
+        description="Decimate the model to a fraction of its polygons before the "
+                    "build, to speed up a heavy sculpt. Repairs nothing, and loses "
+                    "fine detail as the Ratio drops",
+        default=False)
+    decimate_ratio: FloatProperty(
+        name="Ratio", default=0.5, min=0.1, max=1.0, subtype='FACTOR',
+        description="Fraction of the polygons to keep (0.5 = half)")
     voxel_safe: BoolProperty(
-        name="Safe Remesh",
-        description="Voxel-remesh the whole model first — for messy or non-manifold meshes",
+        name="Rebuild as Solid",
+        description="Voxel-remesh the whole model into a fresh watertight solid first, "
+                    "for a mesh Clean Up can't repair (self-intersecting, many "
+                    "pieces). Fixes nearly anything, but softens detail finer than "
+                    "the voxel size. Without it, a model that is still not "
+                    "watertight after Clean Up is remeshed automatically for the "
+                    "mold (the positive keeps full detail)",
         default=False,
     )
     voxel_size: _dist("Remesh Voxel", 1.0,
-                      "Voxel size for Safe Remesh (smaller = finer, slower)", mn=0.05)
+                      "Voxel size for Rebuild as Solid (smaller = finer, slower)", mn=0.05)
     mold_detail: FloatProperty(
         name="Mold Detail",
         description="Polygon density of the generated mold body and clamp wings. "

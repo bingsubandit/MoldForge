@@ -292,19 +292,15 @@ def _build_once(master, props, trim_ok=False):
     _into_mm(work, k)
     try:
         yield (0.05, "preparing mesh")
-        # A non-manifold mesh makes the fast boolean solver bail (booleans get
-        # silently skipped → a broken mold) and a very heavy mesh is painfully slow;
-        # either way we voxel-remesh into a clean, light, watertight solid. When we're
-        # going to remesh anyway, skip the heal — it's expensive on a heavy mesh and
-        # the remesh cleans it regardless.
-        need_clean = (not props.voxel_safe
-                      and (util.nonmanifold_count(work) > 0
-                           or len(work.data.polygons) > C.HEAVY_FACES))
-        if not need_clean:
-            if props.heal:
-                meshprep.heal(work)
-            else:
-                meshprep.ensure_outward_normals(work)
+        # Clean Up Model first (weld, drop stray fragments and bad faces, fill
+        # small holes): a model it repairs then builds as it is, at full detail,
+        # instead of being taken for broken below. The positive is snapshotted
+        # from this copy, so it comes out clean too.
+        clean_note = ""
+        if props.heal:
+            _counts, clean_note = meshprep.clean_model(work, fill_holes=False)
+        else:
+            meshprep.ensure_outward_normals(work)
         # A boolean-cut flat bottom is one face of needle-thin triangles that
         # every later boolean on it (the plinth, the plate, the shell) has to
         # slice: rebuild it as an even mesh on this working copy.
@@ -314,10 +310,17 @@ def _build_once(master, props, trim_ok=False):
             if not fixed and not bottom_note.startswith("the flat bottom could not"):
                 bottom_note = ""
         if props.heal:
-            holes = meshprep.close_small_holes(work)
+            holes = meshprep.fill_small_holes(work)
             if holes:
-                bottom_note = "; ".join(x for x in (
-                    bottom_note, f"closed {holes} tiny hole(s) in the model's mesh") if x)
+                clean_note = (clean_note + f", filled {holes} hole(s)" if clean_note
+                              else f"cleaned up the model: filled {holes} hole(s)")
+        bottom_note = "; ".join(x for x in (clean_note, bottom_note) if x)
+        # A non-manifold mesh makes the fast boolean solver bail (booleans get
+        # silently skipped → a broken mold) and a very heavy mesh is painfully slow;
+        # either way we voxel-remesh into a clean, light, watertight solid.
+        need_clean = (not props.voxel_safe
+                      and (util.nonmanifold_count(work) > 0
+                           or len(work.data.polygons) > C.HEAVY_FACES))
         if props.decimate:
             meshprep.decimate(work, props.decimate_ratio)
         meshprep.center_object(work)
@@ -1309,7 +1312,7 @@ def _build_tray(master, props):
     try:
         yield (0.10, "preparing mesh")
         if props.heal:
-            meshprep.heal(work)
+            meshprep.clean_model(work)
         else:
             meshprep.ensure_outward_normals(work)
         if props.decimate:

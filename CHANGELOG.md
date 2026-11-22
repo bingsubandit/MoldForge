@@ -4,6 +4,16 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+- **Clean Up Model** (Mesh Prep, was Heal Mesh) now repairs the model before
+  the build: besides welding and fixing normals it drops tiny stray fragments,
+  deletes zero-area, duplicate and loose geometry and fills small holes (a big
+  opening stays open). It used to run only on a model that was already
+  watertight, so it never saw what was wrong: the user's fairy house, with 16
+  specks floating by it, was auto-remeshed and its positive kept every speck
+  (and a key plate couldn't fuse with it). It now runs first, and a model it
+  repairs builds at full detail. **Clean Up Model Now** does it to the model
+  itself. Decimate and Safe Remesh are relabelled **Reduce Polygons** and
+  **Rebuild as Solid (remesh)**, with tooltips that say what they do.
 - **Caught up with upstream 0.46.9** (Fix Flat Bottom, Skin Mold, Inner Cores,
   Split with My Planes, unit fixes and the rest below). The fork's features sit on
   top; STL export keeps its clean-up when it scales to millimetres.

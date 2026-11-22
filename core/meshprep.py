@@ -328,6 +328,156 @@ def fix_flat_bottom(obj, tol=0.3, only_if_bad=False, scale=1.0):
                   f"triangles{how}")
 
 
+def _islands(bm):
+    """The face-connected pieces of ``bm``, as lists of faces."""
+    seen, out = set(), []
+    for f in bm.faces:
+        if f in seen:
+            continue
+        seen.add(f)
+        stack, faces = [f], []
+        while stack:
+            g = stack.pop()
+            faces.append(g)
+            for e in g.edges:
+                for h in e.link_faces:
+                    if h not in seen:
+                        seen.add(h)
+                        stack.append(h)
+        out.append(faces)
+    return out
+
+
+def _span(verts):
+    """Bounding-box diagonal of some vertices."""
+    xs, ys, zs = zip(*(v.co[:] for v in verts))
+    return math.dist((min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs)))
+
+
+def fill_small_holes(obj, hole_span=0.1):
+    """Fill the small holes in ``obj``: open outlines of at most 12 edges, or
+    larger ones smaller than ``hole_span`` of the model's size. A big opening
+    (a hollow underside, an open cup) is left open. Returns how many were
+    filled."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    try:
+        if not bm.faces:
+            return 0
+        size = _span(bm.verts)
+        open_edges = {e for e in bm.edges if len(e.link_faces) == 1}
+        small = []
+        while open_edges:                       # one outline at a time
+            e = open_edges.pop()
+            outline, stack = [e], [e]
+            while stack:
+                for v in stack.pop().verts:
+                    for x in v.link_edges:
+                        if x in open_edges:
+                            open_edges.discard(x)
+                            outline.append(x)
+                            stack.append(x)
+            if (len(outline) <= 12
+                    or _span({v for x in outline for v in x.verts}) < hole_span * size):
+                small.append(outline)
+        filled = 0
+        for outline in small:
+            if bmesh.ops.holes_fill(bm, edges=outline, sides=0)["faces"]:
+                filled += 1
+        if filled:
+            bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+            bm.to_mesh(obj.data)
+            obj.data.update()
+        return filled
+    finally:
+        bm.free()
+
+
+def clean_model(obj, scale=1.0, fill_holes=True, hole_span=0.1, fragment_span=0.02):
+    """Repair the faults that keep a model from being one clean solid, in place,
+    and say what was done. ``scale`` is millimetres per unit (tolerances are mm).
+
+    - weld vertices that sit on the same spot (an STL stores every triangle's
+      corners separately; a seam that was never joined stays open),
+    - delete zero-area faces, faces that duplicate another one exactly, and
+      loose edges and vertices,
+    - drop stray fragments: pieces under ``fragment_span`` of the model's size
+      (specks, single triangles left floating by an export or a boolean),
+    - fill small holes: open outlines of at most 12 edges, or larger ones
+      smaller than ``hole_span`` of the model (a big opening such as a hollow
+      underside is left open),
+    - make the face normals consistent and pointing out.
+
+    Returns ``(counts, note)``: a dict of what changed, and a short sentence
+    for the build notes ("" when the model was already clean)."""
+    import collections
+    tol = 1e-4 / max(scale, 1e-12)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    counts = dict(welded=0, degenerate=0, duplicates=0, loose=0, fragments=0, holes=0)
+    try:
+        n = len(bm.verts)
+        bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=tol)
+        counts["welded"] = n - len(bm.verts)
+
+        n = len(bm.faces)
+        bmesh.ops.dissolve_degenerate(bm, edges=bm.edges[:], dist=tol * 0.1)
+        bm.faces.ensure_lookup_table()
+        counts["degenerate"] = max(n - len(bm.faces), 0)
+
+        groups = collections.defaultdict(list)
+        for f in bm.faces:
+            groups[frozenset(f.verts)].append(f)
+        dup = [f for fs in groups.values() if len(fs) > 1 for f in fs[1:]]
+        if dup:
+            bmesh.ops.delete(bm, geom=dup, context='FACES_ONLY')
+            counts["duplicates"] = len(dup)
+
+        loose_e = [e for e in bm.edges if not e.link_faces]
+        if loose_e:
+            bmesh.ops.delete(bm, geom=loose_e, context='EDGES')
+        loose_v = [v for v in bm.verts if not v.link_faces]
+        if loose_v:
+            bmesh.ops.delete(bm, geom=loose_v, context='VERTS')
+        counts["loose"] = len(loose_e) + len(loose_v)
+
+        if bm.faces:
+            pieces = _islands(bm)
+            size = _span(bm.verts)
+            biggest = max(len(fs) for fs in pieces)
+            stray = [fs for fs in pieces if len(fs) < biggest
+                     and _span({v for f in fs for v in f.verts}) < fragment_span * size]
+            if stray:
+                faces = [f for fs in stray for f in fs]
+                verts = {v for f in faces for v in f.verts}
+                bmesh.ops.delete(bm, geom=list(verts), context='VERTS')
+                counts["fragments"] = len(stray)
+
+        if bm.faces:
+            bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    finally:
+        bm.free()
+    if fill_holes:
+        counts["holes"] = fill_small_holes(obj, hole_span)
+
+    words = []
+    if counts["fragments"]:
+        words.append(f"dropped {counts['fragments']} stray fragment(s)")
+    if counts["holes"]:
+        words.append(f"filled {counts['holes']} hole(s)")
+    if counts["welded"]:
+        words.append(f"welded {counts['welded']} doubled vertices")
+    bad = counts["degenerate"] + counts["duplicates"]
+    if bad:
+        words.append(f"deleted {bad} zero-area or duplicate face(s)")
+    if counts["loose"]:
+        words.append(f"removed {counts['loose']} loose edge(s)/vertices")
+    note = ("cleaned up the model: " + ", ".join(words)) if words else ""
+    return counts, note
+
+
 def close_small_holes(obj, sides=12):
     """Close the tiny holes a sculpt or a scan leaves (open outlines of at
     most ``sides`` edges) - each keeps a boolean from making the model one

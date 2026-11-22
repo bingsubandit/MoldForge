@@ -402,6 +402,45 @@ class MOLDFORGE_OT_fix_bottom(bpy.types.Operator):
         return {'CANCELLED'}
 
 
+class MOLDFORGE_OT_clean_model(bpy.types.Operator):
+    """Clean up the selected model itself (with undo): weld doubled vertices,
+    delete zero-area, duplicate and loose geometry, drop tiny stray fragments,
+    fill small holes, point the faces outward and, with Fix Flat Bottom on,
+    rebuild a badly meshed flat bottom"""
+    bl_idname = "moldforge.clean_model"
+    bl_label = "Clean Up Model"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and obj.type == 'MESH'
+                and not obj.name.startswith(("MF_", "Kept_MF_")))
+
+    def execute(self, context):
+        from .core import meshprep
+        obj = context.active_object
+        if obj.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        mpu = units.mm_per_unit(context.scene)          # tolerances are mm
+        _counts, note = meshprep.clean_model(obj, scale=mpu, fill_holes=False)
+        notes = [note] if note else []
+        if context.scene.moldforge.fix_bottom:
+            fixed, bnote = meshprep.fix_flat_bottom(obj, only_if_bad=True, scale=mpu)
+            if bnote and (fixed or bnote.startswith("the flat bottom could not")):
+                notes.append(bnote)
+        holes = meshprep.fill_small_holes(obj)
+        if holes:
+            notes.append(f"filled {holes} hole(s)")
+        left = mf_util.nonmanifold_count(obj)
+        msg = "; ".join(notes) if notes else "the model was already clean"
+        if left:
+            msg += (f" - {left} open or overlapping edge(s) remain; Rebuild as Solid "
+                    "or the build's auto-remesh will handle them")
+        self.report({'WARNING'} if left else {'INFO'}, msg[0].upper() + msg[1:])
+        return {'FINISHED'}
+
+
 class MOLDFORGE_OT_add_split_plane(bpy.types.Operator):
     """Add a split plane through the selected model (or at the 3D cursor). Move
     and rotate it to where the mold should come apart; add as many as you like.
