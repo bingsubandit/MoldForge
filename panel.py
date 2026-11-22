@@ -533,8 +533,10 @@ class MOLDFORGE_PT_shell(_MFSub, bpy.types.Panel):
             layout.prop(props, "base_plate", text="Key plate")
             if props.base_plate:
                 layout.prop(props, "fit_clearance", text="Clearance")
-                layout.prop(props, "plate_screw", text="Screw master")
-                if props.plate_screw:
+                layout.prop(props, "plate_unite", text="Unite with model")
+                if not props.plate_unite:
+                    layout.prop(props, "plate_screw", text="Screw master")
+                if props.plate_screw and not props.plate_unite:
                     col = layout.column(align=True)
                     col.prop(props, "screw_diameter", text="Screw hole Ø")
                     col.prop(props, "screw_countersink", text="Head recess")

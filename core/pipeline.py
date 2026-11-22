@@ -604,7 +604,9 @@ def _build_once(master, props, trim_ok=False):
             if p.base_flange:
                 build.add_flange(mold, coll, p.flange_width, p.flange_thickness, p.bolt_radius)
         elif p.base_style == 'OPEN':
-            screw_on = bool(p.base_plate and getattr(p, "plate_screw", False))
+            plate_unite = bool(p.base_plate and getattr(p, "plate_unite", False))
+            screw_on = bool(p.base_plate and getattr(p, "plate_screw", False)
+                            and not plate_unite)
             if p.base_plate:
                 # Detachable keyed bottom: cuts the shell open and returns the
                 # separate plate (model pocket + pins; the rim gets the sockets
@@ -612,7 +614,7 @@ def _build_once(master, props, trim_ok=False):
                 plate = build.add_base_plate(
                     mold, work, p, coll,
                     min_floor=build.screw_floor(p) if screw_on else 0.0,
-                    pocket_src=positive)
+                    pocket_src=positive, fuse=plate_unite)
                 open_z = plate.get("mf_plate_top", util.world_bbox(work)[0].z)
                 if screw_on:
                     # Screw the master to the plate instead of gluing it.
@@ -758,6 +760,13 @@ def _build_once(master, props, trim_ok=False):
             except Exception:
                 pass                          # cosmetic pass - never fail a build
 
+        if plate is not None and getattr(p, "plate_unite", False):
+            # Unite Plate with Model: the plate becomes part of the positive, one
+            # print. A union that fails validation falls back to an overlapping
+            # join (prints the same) and is reported, as for a Locking Base.
+            base_united = build.unite_plinth(positive, plate, coll)
+            util.remove_object(plate)
+            plate = None
         if plate is not None:
             parts.append(plate)              # validated/moved/exported like any part
         if lock_base_part is not None:
@@ -1358,6 +1367,7 @@ def _derive_sizes(work, props):
         base_flange=getattr(props, "base_flange", True),
         base_plate=getattr(props, "base_plate", False),
         plate_screw=getattr(props, "plate_screw", False),
+        plate_unite=getattr(props, "plate_unite", False),
         screw_diameter=getattr(props, "screw_diameter", 3.4),
         screw_countersink=getattr(props, "screw_countersink", True),
         screw_head_diameter=getattr(props, "screw_head_diameter", 6.5),

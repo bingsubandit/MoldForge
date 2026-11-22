@@ -228,7 +228,7 @@ class _BuildOperator:
                          "(Cut Positive Too is off, the mesh was too messy to "
                          "section, or seams were clamped) - print that piece tilted")
         if result.get("base_united") is False:
-            notes.append("the sawtooth base could not be boolean-united into the "
+            notes.append("the base could not be boolean-united into the "
                          "positive (messy source mesh), so it sits inside it as a "
                          "second shell - slicer hollowing tools will leave the base "
                          "solid; heal or remesh the model for a clean union")

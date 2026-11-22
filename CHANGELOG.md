@@ -21,6 +21,11 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
   clamp wings are rebuilt on a voxel grid sized from the wall, which came out
   coarse with jagged edges. Mold Detail divides that voxel: the default 2 is
   twice as fine (about 4x the polygons, slower), 1 is the old setting, up to 8.
+- **New: Unite Plate with Model** (Open Bottom + Key Plate). Fuses the key
+  plate into the positive, so master and plate print as one piece instead of
+  being glued or screwed - the counterpart of a Locking Base's Unite Base with
+  Model. The plate is built without its pocket (whose fit clearance would leave
+  a moat round the master), and the shells still key onto its collar.
 
 ## 0.44.2 — the user's model: no stray shells, the label found
 

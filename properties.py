@@ -302,6 +302,14 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
                     "collar — self-aligning all round and a seal for the pour",
         default=False,
     )
+    plate_unite: BoolProperty(
+        name="Unite Plate with Model",
+        description="Join the key plate into the positive so master + plate print "
+                    "as one piece - no pocket fit, glue or screw. The shells still "
+                    "key onto the plate's collar. Untick to print the plate "
+                    "separately",
+        default=False,
+    )
     plate_screw: BoolProperty(
         name="Screw Master to Plate",
         description="Hold the printed master on the key plate with one screw instead "

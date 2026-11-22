@@ -2079,7 +2079,8 @@ def cradle_base(base, positive, coll):
     return False
 
 
-def add_base_plate(mold, master, props, coll, min_floor=0.0, pocket_src=None):
+def add_base_plate(mold, master, props, coll, min_floor=0.0, pocket_src=None,
+                   fuse=False):
     """Detachable bottom: cut the mold open just above the master's base and close
     it with a separate one-piece printed plate (``MF_Mold_Base``).
 
@@ -2090,6 +2091,10 @@ def add_base_plate(mold, master, props, coll, min_floor=0.0, pocket_src=None):
     ``min_floor`` is plate material the caller needs UNDER the master (a
     countersunk or counterbored screw); the plate is thickened to give it. The plate's top (the
     cast opening's plane) is stored on it as ``mf_plate_top``.
+
+    ``fuse``: the plate will be united into the positive (Unite Plate with
+    Model), so no pocket is cut - its fit clearance would leave a moat around
+    the master's base.
 
     The plate registers BOTH mating parts. The master's bottom slice is
     differenced out of the plate top — a pocket the model drops into, aligning
@@ -2135,14 +2140,17 @@ def add_base_plate(mold, master, props, coll, min_floor=0.0, pocket_src=None):
     # Model-bottom registration pocket, opened by ``fit`` per face so the printed
     # model actually drops in (an exact cut would print too tight).
     pocket_cut = None
-    if pocket_src is not None:
+    if fuse:
+        pass
+    elif pocket_src is not None:
         pocket_cut = _pocket_cutter(pocket_src, fit, util.world_bbox(plate)[0].z - 1.0,
                                     cut_z + fit + 1.0, coll)
-    if pocket_cut is None:
+    if pocket_cut is None and not fuse:
         pocket_cut = (_dilate_solid(master, fit, "MF_ppk", props, coll) if fit > 0.05
                       else util.duplicate_object(master, "MF_ppk", coll))
-    util.boolean(plate, pocket_cut, 'DIFFERENCE')
-    util.remove_object(pocket_cut)
+    if pocket_cut is not None:
+        util.boolean(plate, pocket_cut, 'DIFFERENCE')
+        util.remove_object(pocket_cut)
 
     # Chin collar on the plate (0.2 overlap into the slab for a clean weld).
     chin = _rim_band(master, wall_in - 1.2, wall_in + shell + 1.2,

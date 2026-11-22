@@ -2039,6 +2039,51 @@ def main():
           f"a base too slim for the insert skips the screw with a reason "
           f"({rs4_.get('screw_note')!r})")
 
+    # Unite Plate with Model: the plate is fused into the positive - one print,
+    # no separate MF_Mold_Base, no screw - and the shells still key onto it.
+    print("\n=== Key plate united with the model ===")
+    reset_scene()
+    toy_u = _flat_toy("ScrewToy")
+    toy_bot = mfutil.world_bbox(toy_u)[0].z
+    ru_ = pipeline.build_mold_system(toy_u, _over(default_props(), **dict(
+        screw_cfg, plate_unite=True)))
+    bpy.context.view_layer.update()
+    upos = ru_["positive"]
+    check(not any(q.name.startswith("MF_Mold_Base") for q in ru_["parts"]),
+          "united: no separate plate part")
+    check(all(mfutil.part_is_valid(q)[0] for q in ru_["parts"]),
+          "united: the shells are valid")
+    check(ru_.get("base_united") is True and mfutil.part_is_valid(upos)[0]
+          and mfutil.island_count(upos) == 1,
+          "united: master + plate are one valid solid")
+    check(ru_.get("screw_ok") is None, "united: the screw is skipped (nothing to screw)")
+    umn, umx = mfutil.world_bbox(upos)
+    u_up = _up(upos, (umn.x + umx.x) * 0.5 + 23.1, (umn.y + umx.y) * 0.5, umn.z - 5.0)
+    reset_scene()
+    rp_ = pipeline.build_mold_system(_flat_toy("ScrewToy"), _over(default_props(), **dict(
+        screw_cfg, plate_screw=False)))
+    bpy.context.view_layer.update()
+    pplate = next(q for q in rp_["parts"] if q.name.startswith("MF_Mold_Base"))
+    pmn_, pmx_ = mfutil.world_bbox(pplate)
+    smn_ = mfutil.world_bbox(rp_["positive"])[0]
+    # Same build space (parts are moved home by the same rule), so compare spans.
+    check(abs((umx.z - umn.z) - (mfutil.world_bbox(rp_["positive"])[1].z - pmn_.z)) < 0.3,
+          f"united positive spans the plate's bottom to the model's top "
+          f"({umx.z - umn.z:.1f} mm)")
+    check(abs((umx.x - umn.x) - (pmx_.x - pmn_.x)) < 0.3,
+          "united positive is as wide as the plate")
+    # No moat: just outside the master's base (radius 23, the flared foot), the plate is
+    # only its pocket floor thick (the pocket's fit clearance), but the united
+    # plate is solid to its top there.
+    p_up = _up(pplate, (pmn_.x + pmx_.x) * 0.5 + 23.1, (pmn_.y + pmx_.y) * 0.5,
+               pmn_.z - 5.0)
+    u_thick = (u_up[1] - u_up[0]) if len(u_up) > 1 else 0.0
+    p_thick = (p_up[1] - p_up[0]) if len(p_up) > 1 else 0.0
+    check(u_thick > p_thick + 0.8,
+          f"united plate has no pocket moat around the master's base "
+          f"({u_thick:.2f} mm solid vs {p_thick:.2f} mm under the separate "
+          f"plate's pocket)")
+
     # --- The base formers on an OPEN bottom (user request): the suction cup,
     # the Vac-U-Lock plug and the dual core hang from four legs resting on the
     # shells' bottom rim, with or without the key plate.
