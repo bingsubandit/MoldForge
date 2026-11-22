@@ -537,10 +537,13 @@ class MOLDFORGE_PT_shell(_MFSub, bpy.types.Panel):
                 if props.plate_screw:
                     col = layout.column(align=True)
                     col.prop(props, "screw_diameter", text="Screw hole Ø")
-                    col.prop(props, "screw_countersink", text="Countersink")
+                    col.prop(props, "screw_countersink", text="Head recess")
                     sub = col.column(align=True)
                     sub.active = props.screw_countersink
+                    sub.prop(props, "screw_head_type", text="")
                     sub.prop(props, "screw_head_diameter", text="Head Ø")
+                    if props.screw_head_type == 'COUNTERBORE':
+                        sub.prop(props, "screw_head_depth", text="Head depth")
                     col = layout.column(align=True)
                     col.prop(props, "insert_diameter", text="Insert hole Ø")
                     col.prop(props, "insert_depth", text="Insert depth")

@@ -1915,6 +1915,42 @@ def main():
     plain = _up(splate2, sx2 + 2.3, sy2, s2mn.z - 5.0)
     check(mfutil.part_is_valid(splate2)[0] and plain and plain[0] - s2mn.z < 0.05,
           "Countersink off leaves a plain straight hole")
+    # Counterbore: a flat-bottomed recess for a pan / socket head, 6.0 x 3.0 mm.
+    reset_scene()
+    rs5_ = pipeline.build_mold_system(_flat_toy("ScrewToy"),
+                                      _over(default_props(), **dict(
+                                          screw_cfg, screw_head_type='COUNTERBORE',
+                                          screw_head_diameter=6.0,
+                                          screw_head_depth=3.0)))
+    bpy.context.view_layer.update()
+    splate5 = next(q for q in rs5_["parts"] if q.name.startswith("MF_Mold_Base"))
+    spos5 = rs5_["positive"]
+    check(all(mfutil.part_is_valid(q)[0] for q in rs5_["parts"])
+          and mfutil.part_is_valid(spos5)[0]
+          and "counterbored 6.0 x 3.0" in rs5_.get("screw_note", ""),
+          f"counterbored plate: all parts valid ({rs5_.get('screw_note')!r})")
+    sx5 = rs5_["screw_spot"][0] + splate5.location.x
+    sy5 = rs5_["screw_spot"][1] + splate5.location.y
+    s5mn = mfutil.world_bbox(splate5)[0]
+    s5_bot = mfutil.world_bbox(spos5)[0].z
+    check(not [z for z in _up(splate5, sx5, sy5, s5mn.z - 5.0) if z < s5_bot - 0.1],
+          "counterbore: the screw hole still runs clean through the plate")
+    # Flat bottom: the same 3.0 mm up just outside the hole and near the wall,
+    # where a countersink cone would be 0.7 and 0.2 mm up.
+    cb_in = _up(splate5, sx5 + 2.0, sy5, s5mn.z - 5.0)
+    cb_out = _up(splate5, sx5 + 2.8, sy5, s5mn.z - 5.0)
+    cb_rim = _up(splate5, sx5 + 3.4, sy5, s5mn.z - 5.0)
+    check(cb_in and cb_out and abs(cb_in[0] - s5mn.z - 3.0) < 0.1
+          and abs(cb_out[0] - s5mn.z - 3.0) < 0.1,
+          f"the counterbore has a flat bottom 3.0 mm up (at 2.0 mm off the axis "
+          f"{(cb_in or [0])[0] - s5mn.z:.2f}, at 2.8 mm "
+          f"{(cb_out or [0])[0] - s5mn.z:.2f})")
+    check(cb_rim and cb_rim[0] - s5mn.z < 0.05,
+          "the counterbore is its 6.0 mm diameter, no wider")
+    floor5 = (cb_rim[1] if cb_rim and len(cb_rim) > 1 else s5mn.z) - s5mn.z
+    check(floor5 >= 3.0 + 1.4,
+          f"the plate is thickened to keep 1.5 mm under a 3.0 mm counterbore "
+          f"({floor5:.2f} mm of floor)")
     # A toy whose base is hollow in the middle: the screw moves to the nearest
     # spot with 2 mm of master round the insert, instead of drilling into air.
     reset_scene()

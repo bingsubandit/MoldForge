@@ -2,6 +2,15 @@
 
 All notable changes. Versions are the add-on `version` in `blender_manifest.toml`.
 
+## Unreleased
+
+- **New: counterbored screw heads.** Screw Master to Plate could only
+  countersink the plate for a flat-head screw. A new Head Type choice adds a
+  flat-bottomed counterbore for pan, button, cheese or socket cap heads, with
+  its own Head Ø and Head Depth; the plate is thickened to keep 1.5 mm under
+  the head. The Countersink toggle is now Head Recess and switches either
+  type on or off; saved settings from earlier versions load unchanged.
+
 ## 0.44.2 — the user's model: no stray shells, the label found
 
 Tested on the user's own model (a ridged toy with a hollow underside, on a

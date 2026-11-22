@@ -2088,7 +2088,7 @@ def add_base_plate(mold, master, props, coll, min_floor=0.0, pocket_src=None):
     watertight, and a pocket from that let the printed master poke into the plate).
 
     ``min_floor`` is plate material the caller needs UNDER the master (a
-    countersunk screw); the plate is thickened to give it. The plate's top (the
+    countersunk or counterbored screw); the plate is thickened to give it. The plate's top (the
     cast opening's plane) is stored on it as ``mf_plate_top``.
 
     The plate registers BOTH mating parts. The master's bottom slice is
@@ -2174,10 +2174,13 @@ SCREW_MIN_WALL = 2.0     # mm of master that must surround the heat-set insert
 
 
 def screw_floor(props):
-    """Plate material the screw needs under the master: the countersink cone plus
-    1.5 mm of straight hole for the head to bear on, or 2.5 mm without one."""
+    """Plate material the screw needs under the master: the head recess (the
+    countersink cone, or the counterbore's depth) plus 1.5 mm of straight hole for
+    the head to bear on, or 2.5 mm without a recess."""
     hole = max(getattr(props, "screw_diameter", 3.4), 0.5)
     if getattr(props, "screw_countersink", True):
+        if getattr(props, "screw_head_type", 'FLAT') == 'COUNTERBORE':
+            return max(getattr(props, "screw_head_depth", 3.0), 0.2) + 1.5
         head = max(getattr(props, "screw_head_diameter", 6.5), hole)
         return (head - hole) * 0.5 + 1.5
     return 2.5
@@ -2246,7 +2249,7 @@ def plate_screw_spot(positive, props, top_z, centre=None):
 
 def add_plate_screw(plate, positive, props, coll):
     """Screw the printed master to the key plate instead of gluing it: a hole for
-    the screw through the plate (countersunk from below, so the plate still sits
+    the screw through the plate (countersunk or counterbored from below, so the plate still sits
     flat on the table) and a blind hole up into the master's underside for a
     heat-set threaded insert, on one axis at ``plate_screw_spot``.
 
@@ -2267,19 +2270,30 @@ def add_plate_screw(plate, positive, props, coll):
     z_bot = util.world_bbox(plate)[0].z
 
     # The plate: screw hole from below the plate up past the master's underside,
-    # and a 90 degree countersink cone opening at the plate's bottom face.
+    # and a head recess opening at the plate's bottom face: a 90 degree
+    # countersink cone for a flat head, or a flat-bottomed counterbore for a pan
+    # or socket head.
     hole = util.add_cone("MF_screwhole",
                          Vector((x, y, (z_bot - 1.0 + zb + 1.0) * 0.5)),
                          hole_r, hole_r, (zb + 1.0) - (z_bot - 1.0), 'Z', coll,
                          segments=48)
-    head_d = 0.0
+    sink_txt = ""
     if getattr(props, "screw_countersink", True):
         head_r = max(getattr(props, "screw_head_diameter", 6.5) * 0.5, hole_r + 0.1)
-        head_d = 2.0 * head_r
-        cs = head_r - hole_r
-        sink = util.add_cone("MF_screwsink",
-                             Vector((x, y, z_bot - 0.5 + (cs + 0.5) * 0.5)),
-                             head_r + 0.5, hole_r, cs + 0.5, 'Z', coll, segments=48)
+        if getattr(props, "screw_head_type", 'FLAT') == 'COUNTERBORE':
+            cb = max(getattr(props, "screw_head_depth", 3.0), 0.2)
+            # Starts 0.5 below the face so the cut opens cleanly through it.
+            sink = util.add_cone("MF_screwsink",
+                                 Vector((x, y, z_bot - 0.5 + (cb + 0.5) * 0.5)),
+                                 head_r, head_r, cb + 0.5, 'Z', coll, segments=48)
+            sink_txt = f", counterbored {2 * head_r:.1f} x {cb:.1f}"
+        else:
+            cs = head_r - hole_r
+            sink = util.add_cone("MF_screwsink",
+                                 Vector((x, y, z_bot - 0.5 + (cs + 0.5) * 0.5)),
+                                 head_r + 0.5, hole_r, cs + 0.5, 'Z', coll,
+                                 segments=48)
+            sink_txt = f", countersunk {2 * head_r:.1f}"
         util.boolean(hole, sink, 'UNION')
         util.remove_object(sink)
     util.boolean(plate, hole, 'DIFFERENCE')
@@ -2320,7 +2334,6 @@ def add_plate_screw(plate, positive, props, coll):
         bpy.data.meshes.remove(bak)
 
     off = math.hypot(x - cx, y - cy)
-    sink_txt = f", countersunk {head_d:.1f}" if head_d else ""
     where = ("at the middle of the base" if off < 1.0
              else f"{off:.0f} mm off the base centre, where the master is thick enough")
     note = (f"screw {where}: {2 * hole_r:.1f} mm hole through the plate{sink_txt}, "

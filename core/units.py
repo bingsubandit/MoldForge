@@ -30,7 +30,8 @@ LENGTH_PROPS = frozenset({
     "lock_height", "lock_margin", "lock_tooth_depth", "lock_tolerance",
     "tray_wall", "tray_floor", "tray_margin", "tray_depth",
     "stamp_width", "stamp_relief", "core_wall",
-    "screw_diameter", "screw_head_diameter", "insert_diameter", "insert_depth",
+    "screw_diameter", "screw_head_diameter", "screw_head_depth",
+    "insert_diameter", "insert_depth",
     "channel_radius", "label_size", "label_depth",
 })
 

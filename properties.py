@@ -305,27 +305,49 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
     plate_screw: BoolProperty(
         name="Screw Master to Plate",
         description="Hold the printed master on the key plate with one screw instead "
-                    "of glue: a hole through the plate (countersunk from below, so "
+                    "of glue: a hole through the plate (recessed from below for the "
+                    "screw head - countersunk or counterbored - so "
                     "the plate still sits flat) and a hole in the master's underside "
                     "for a heat-set threaded insert. It goes in the middle of the "
                     "base, or at the nearest spot with enough master around the "
-                    "insert. The plate is thickened to fit the countersink",
+                    "insert. The plate is thickened to fit the head recess",
         default=False,
     )
     screw_diameter: _dist("Screw Hole", 3.4,
                           "Hole through the key plate for the screw (3.4 for M3, "
                           "4.5 for M4)", mn=1.0, soft=10.0)
+    # Kept under its original name so saved settings from older versions load;
+    # it now switches the head recess on or off, whichever head type is chosen.
     screw_countersink: BoolProperty(
-        name="Countersink",
-        description="Countersink the plate's underside for a flat-head screw, so the "
-                    "head sits flush and the plate stays flat on the table. Untick "
-                    "for a plain hole",
+        name="Head Recess",
+        description="Recess the plate's underside for the screw head, so the head "
+                    "sits flush and the plate stays flat on the table. Untick for a "
+                    "plain hole",
         default=True,
     )
+    screw_head_type: EnumProperty(
+        name="Head Type",
+        description="Shape of the recess the screw head sits in",
+        items=[
+            ('FLAT', "Flat Head (Countersink)",
+             "A 90 degree cone, for countersunk flat-head screws"),
+            ('COUNTERBORE', "Pan / Socket Head (Counterbore)",
+             "A flat-bottomed straight recess, for pan, button, cheese or socket "
+             "cap heads"),
+        ],
+        default='FLAT',
+    )
     screw_head_diameter: _dist("Head Diameter", 6.5,
-                               "Countersink diameter at the plate's underside, for "
-                               "the screw head (about 6.5 for M3, 8.5 for M4); the "
-                               "cone is 90 degrees", mn=1.0, soft=16.0)
+                               "Recess diameter at the plate's underside, for the "
+                               "screw head (flat head: about 6.5 for M3, 8.5 for M4, "
+                               "the cone is 90 degrees; socket cap: about 6.0 for "
+                               "M3, 7.5 for M4 - add a little clearance)",
+                               mn=1.0, soft=16.0)
+    screw_head_depth: _dist("Head Depth", 3.0,
+                            "Counterbore depth: how far the head sinks into the "
+                            "plate (the head's height, about 3.0 for an M3 socket "
+                            "cap, 1.8 for an M3 pan head). The plate is thickened "
+                            "to keep 1.5 mm under the head", mn=0.2, soft=10.0)
     insert_diameter: _dist("Insert Hole", 4.0,
                            "Hole in the master's underside for the heat-set threaded "
                            "insert (about 4.0 for M3 inserts, 5.6 for M4 - check "

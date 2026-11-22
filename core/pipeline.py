@@ -1356,6 +1356,8 @@ def _derive_sizes(work, props):
         screw_diameter=getattr(props, "screw_diameter", 3.4),
         screw_countersink=getattr(props, "screw_countersink", True),
         screw_head_diameter=getattr(props, "screw_head_diameter", 6.5),
+        screw_head_type=getattr(props, "screw_head_type", 'FLAT'),
+        screw_head_depth=getattr(props, "screw_head_depth", 3.0),
         insert_diameter=getattr(props, "insert_diameter", 4.0),
         insert_depth=getattr(props, "insert_depth", 6.5),
         suction_cup=getattr(props, "suction_cup", False),
