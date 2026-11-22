@@ -14,7 +14,7 @@ import bmesh
 from mathutils import Matrix, Vector
 
 from . import constants as C
-from . import util, volume, meshprep
+from . import util, volume, meshprep, footprint
 
 
 def _solidify_dilation(obj, props):
@@ -73,6 +73,57 @@ def _apply_solidify(obj, distance, even):
     util.apply_all_modifiers(obj)
 
 
+EVEN_CLAMP = 3.0      # an even offset moving a vertex further than this x distance ran away
+
+
+def _clamp_even_offset(obj, master, distance):
+    """Pull back the spikes an even-offset Solidify throws at a degenerate spot.
+
+    ``use_even_offset`` moves each vertex 1/cos(half its crease angle) times the
+    distance: about 1.0 on a smooth surface, 1.4 on a box edge, 1.7 on a box
+    corner. Where faces meet almost flat or the mesh has a sliver, it shoots a
+    vertex tens or hundreds of times the distance out: a model with a flat
+    bottom threw 19 vertices of its rim 270 mm out from a 2 mm offset, which
+    ``_offset_exploded`` (made for the near-infinite case) let through. The
+    direct mold came out half a metre wide and the clamp wings, built from such
+    offsets, were cut through by the spikes. A vertex moved over EVEN_CLAMP times
+    the distance gets the plain offset instead - along its own normal, by the
+    distance (what the whole mesh gets when the offset truly explodes); every
+    other vertex keeps its even offset. Solidify keeps the offset copies first
+    and the original vertices after them - checked before anything is moved.
+    Returns how many vertices were pulled back."""
+    import numpy as np
+    n = len(master.data.vertices)
+    me = obj.data
+    if distance <= 0.0 or n == 0 or len(me.vertices) != 2 * n:
+        return 0
+    orig = np.empty(n * 3, np.float64)
+    master.data.vertices.foreach_get("co", orig)
+    orig = orig.reshape(-1, 3)
+    co = np.empty(2 * n * 3, np.float64)
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    if not np.allclose(co[n:], orig, atol=1e-5 * max(1.0, float(np.abs(orig).max()))):
+        return 0                                    # not the layout we expect
+    disp = co[:n] - orig
+    length = np.linalg.norm(disp, axis=1)
+    cap = EVEN_CLAMP * abs(distance)
+    over = length > cap
+    if not over.any():
+        return 0
+    nrm = np.empty(n * 3, np.float64)
+    try:
+        master.data.vertex_normals.foreach_get("vector", nrm)
+    except AttributeError:
+        master.data.vertices.foreach_get("normal", nrm)
+    nrm = nrm.reshape(-1, 3)
+    disp[over] = nrm[over] * distance
+    co[:n] = orig + disp
+    me.vertices.foreach_set("co", co.ravel())
+    me.update()
+    return int(over.sum())
+
+
 def _offset_exploded(obj, master, distance):
     """True if Solidify flung vertices to (near-)infinity. ``use_even_offset`` scales
     the offset by 1/cos(half the crease angle), which DIVERGES at a near-flat (~180 deg)
@@ -103,6 +154,7 @@ def _dilate_solid(master, distance, name, props, coll):
     split."""
     obj = util.duplicate_object(master, name, coll)
     _apply_solidify(obj, distance, even=True)
+    _clamp_even_offset(obj, master, distance)
     if _offset_exploded(obj, master, distance):
         util.remove_object(obj)
         obj = util.duplicate_object(master, name, coll)
@@ -395,7 +447,10 @@ def socket_pocket_cutter(master, plinth, props, coll):
     cmn, cmx = util.world_bbox(column)
     n = int(max(min(round(max(cmx.x - cmn.x, cmx.y - cmn.y) / 1.5), 80), 24))
     under = _under_model_solid(master, cmn.x - 1.0, cmx.x + 1.0, cmn.y - 1.0,
-                               cmx.y + 1.0, z_floor, coll, n)
+                               cmx.y + 1.0, z_floor, coll, n, z_start=mmn.z - 1.0)
+    if under is None:
+        util.remove_object(column)
+        return None
     util.boolean(under, column, 'INTERSECT')
     util.remove_object(column)
     if not under.data.polygons:
@@ -404,7 +459,27 @@ def socket_pocket_cutter(master, plinth, props, coll):
     return under
 
 
-def _under_model_solid(master, x0, x1, y0, y1, z_floor, coll, n):
+def _enclosed(master, inv, x, y, z, reach, dg, dirs=8, need=7):
+    """Is the point (x, y, z), under the model, closed in by it on the sides -
+    do horizontal rays in nearly every direction hit the model? Inside a cap
+    standing on its rim they do (a pocket the wings must stay out of); in the
+    waist of a curved body under an overhang they don't (open to the outside:
+    the clamp wing belongs there)."""
+    o = inv @ Vector((x, y, z))
+    hits = 0
+    for k in range(dirs):
+        a = 2.0 * math.pi * k / dirs
+        d = (inv.to_3x3() @ Vector((math.cos(a), math.sin(a), 0.0))).normalized()
+        if master.ray_cast(o, d, distance=reach, depsgraph=dg)[0]:
+            hits += 1
+            if hits >= need:
+                return True
+        elif k - hits >= dirs - need:
+            return False            # too many open directions already
+    return hits >= need
+
+
+def _under_model_solid(master, x0, x1, y0, y1, z_floor, coll, n, z_start=None):
     """Heightfield solid of the space directly BELOW ``master`` over an n x n grid on
     [x0, x1] x [y0, y1]: each vertex rises from ``z_floor`` to the model's underside
     (the first hit of an upward ray), or stays a hair above the floor where nothing
@@ -415,19 +490,34 @@ def _under_model_solid(master, x0, x1, y0, y1, z_floor, coll, n):
     inv = mw.inverted()
     up = (inv.to_3x3() @ Vector((0.0, 0.0, 1.0))).normalized()
     lo = z_floor + 0.05
+    # Rays start clearly BELOW the model: started on its bottom face (the plinth
+    # top sits 2 mm up the model, so z_floor - 1 was exactly the bottom plane) a
+    # ray could skip that face and report the next surface up - the underside of
+    # an overhang far above - and the "pocket" rose through the model.
+    z0 = z_floor - 1.0 if z_start is None else min(z_start, z_floor - 1.0)
+    mmn_, mmx_ = util.world_bbox(master)
+    reach = (mmx_ - mmn_).length + 10.0
     H = [[lo] * (n + 1) for _ in range(n + 1)]
     for i in range(n + 1):
         x = x0 + (x1 - x0) * i / n
         for j in range(n + 1):
             y = y0 + (y1 - y0) * j / n
-            hit, loc, _nrm, _idx = master.ray_cast(inv @ Vector((x, y, z_floor - 1.0)),
+            hit, loc, _nrm, _idx = master.ray_cast(inv @ Vector((x, y, z0)),
                                                    up, depsgraph=dg)
             if hit:
-                H[i][j] = max((mw @ loc).z, lo)
+                h = (mw @ loc).z
+                if h > lo and not _enclosed(master, inv, x, y, (lo + h) * 0.5, reach, dg):
+                    continue        # open to the side: a waist or overhang, not a pocket
+                H[i][j] = max(h, lo)
     G = [[max(H[a][b]
               for a in range(max(i - 1, 0), min(i + 1, n) + 1)
               for b in range(max(j - 1, 0), min(j + 1, n) + 1))
           for j in range(n + 1)] for i in range(n + 1)]
+    if max(max(row) for row in G) <= lo + 0.5:
+        # nothing closed in overhead anywhere: no pocket. Don't hand back a flat
+        # sheet - cutting the wing rind with one only risks the boolean (it marred
+        # the flange all the way up a curved body)
+        return None
     bm = bmesh.new()
     zb = z_floor - 0.5
     top = [[bm.verts.new((x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * j / n, G[i][j]))
@@ -470,6 +560,10 @@ def unite_plinth(positive, plinth, coll):
         ok = False
         try:
             util.boolean(positive, pp, 'UNION', solver=solver)
+            # a hollow underside, closed by the plinth's top, is a sealed
+            # pocket inside the union - its wall read as a second island, and
+            # the union was thrown away. Nothing reaches it: fill it.
+            util.fill_voids(positive)
             mn2, mx2 = util.world_bbox(positive)
             ok = (util.island_count(positive) == 1
                   and util.nonmanifold_count(positive) == 0
@@ -811,6 +905,46 @@ def _skirt_to_base(obj, cut_z, floor_z):
     finally:
         bm.free()
     return True
+
+
+def build_skin_core(plate, model, thickness, props, coll):
+    """Skin mold: a printed core inside a direct mold, so the cast is a thin
+    flexible skin (latex, silicone) of ``thickness``. The core is the model
+    shrunk inward by the skin thickness (a true offset, like the dual-density
+    core), standing on the key ``plate`` on a straight skirt cut from its own
+    lower section - the skin comes out as a sleeve open at the bottom, where
+    the core is pulled out. The plate registers into the mold halves as
+    always. Returns ``(ok, note, core_volume)``; the plate is left as it was
+    if the core does not come out clean."""
+    core = util.duplicate_object(model, "MF_skincore", coll)
+    bak = plate.data.copy()
+    try:
+        if not erode_solid(core, thickness, coll,
+                           voxel=max(getattr(props, "detail_voxel", 1.0), 0.35)):
+            raise RuntimeError(f"the model is thinner than twice the {thickness:g} mm "
+                               f"skin everywhere")
+        util.remove_small_islands(core)
+        cmn, _cmx = util.world_bbox(core)
+        pmn, _pmx = util.world_bbox(plate)
+        if not _skirt_to_base(core, _skirt_cut(cmn.z, thickness), pmn.z + 0.6):
+            raise RuntimeError("the core's base could not be stood on the plate")
+        core_vol = volume.mesh_volume(core)
+        util.boolean(plate, core, 'UNION')
+        ok, reason = util.part_is_valid(plate)
+        if not ok:
+            raise RuntimeError(f"the core and plate {reason}")
+    except Exception as exc:
+        cur = plate.data
+        plate.data = bak
+        if cur.users == 0:
+            bpy.data.meshes.remove(cur)
+        return False, f"skin core skipped - {exc}", 0.0
+    finally:
+        util.remove_object(core)
+    if bak.users == 0:
+        bpy.data.meshes.remove(bak)
+    return True, (f"skin core: the core stands on the plate {thickness:g} mm in from the "
+                  f"mold all round - pour the skin into the gap"), core_vol
 
 
 def build_dual_kit(dual_src, dual_plinth, props, coll):
@@ -1301,31 +1435,6 @@ def _vac_u_lock_column(d, ln, base_z, coll, x=0.0, y=0.0):
 
 
 
-def _tray_hug_prism(master, offset, z0, z1, props, coll):
-    """A vertical prism whose cross-section is the object's footprint expanded by
-    ``offset`` (with rounded corners), spanning z0..z1. Returns (solid, area).
-
-    The footprint-plus-offset is exactly the cross-section of the object's 3D
-    dilation at mid-height (projection commutes with the Minkowski offset), so we
-    slice a thin cross-section off the dilation and stretch it vertically into a
-    clean vertical-walled prism — no 2D outline maths needed."""
-    d = _dilate_solid(master, offset, "MF_thug", props, coll)
-    mn, mx = util.world_bbox(d)
-    midz = (mn.z + mx.z) * 0.5
-    t = max((mx.z - mn.z) * 0.2, 0.2)               # thin slice, vertical walls there
-    big = (mx - mn).length * 2.0 + 10.0
-    slab = util.add_box("MF_thugs", Vector((0.0, 0.0, midz)), Vector((big, big, t)), coll)
-    util.boolean(d, slab, 'INTERSECT')
-    util.remove_object(slab)
-    util.remove_small_islands(d)
-    area = volume.mesh_volume(d) / t                 # prism volume / its height
-    d.data.transform(Matrix.Translation((0.0, 0.0, -midz)))            # centre on origin
-    d.data.transform(Matrix.Diagonal((1.0, 1.0, (z1 - z0) / t, 1.0)))  # stretch to height
-    d.data.transform(Matrix.Translation((0.0, 0.0, (z0 + z1) * 0.5)))  # move to the band
-    d.data.update()
-    return d, area
-
-
 def build_tray(master, props, coll):
     """One-part open tray (pan) for flat & relief objects.
 
@@ -1361,23 +1470,28 @@ def build_tray(master, props, coll):
 
     pan = None
     cav_area = None
+    fp = None                                        # the footprint, when hugging
     if outline == 'HUG':
+        # every hugging outline is a level of one top-down footprint field: the
+        # walls clear every part of the object (not just its middle) and stay
+        # parallel, so the rim is even and the lift-off rings never cross
         try:
-            pan, _a_out = _tray_hug_prism(master, margin + wall, floor_bottom, rim_z,
-                                          props, coll)
-            cutter, cav_area = _tray_hug_prism(master, margin, cavity_floor_top, cut_top,
-                                               props, coll)
+            fp = footprint.Footprint(master, margin + wall + 2.0)
+            pan, _a_out = fp.prism(margin + wall, floor_bottom, rim_z, coll, "MF_tray",
+                                   single=True)
+            cutter, cav_area = fp.prism(margin, cavity_floor_top, cut_top, coll,
+                                        "MF_trayc")
             util.boolean(pan, cutter, 'DIFFERENCE')
             util.remove_object(cutter)
             util.remove_small_islands(pan)
             if not util.part_is_valid(pan)[0]:       # fall back to a plain rectangle
                 util.remove_object(pan)
-                pan = None
+                pan, fp = None, None
         except Exception:
             for o in list(coll.objects):
-                if o.name.startswith(("MF_thug", "MF_tray")):
+                if o.name.startswith("MF_tray"):
                     util.remove_object(o)
-            pan = None
+            pan, fp = None, None
 
     if pan is None:                                  # RECT (default, and HUG fallback)
         ihx, ihy = fx * 0.5 + margin, fy * 0.5 + margin
@@ -1406,12 +1520,90 @@ def build_tray(master, props, coll):
 
     util.remove_small_islands(pan)
     pan.name = "MF_Mold_A"
+    frame = None
+    if getattr(props, "tray_removable", False):
+        frame = _lift_off_frame(pan, fp, fx, fy, margin, wall, floor,
+                                cavity_floor_top, rim_z, props, coll)
     info = {
         "silicone_volume": silicone_vol,
         "cast_volume": cast_vol,
-        "plastic_volume": volume.mesh_volume(pan),
+        "plastic_volume": volume.mesh_volume(pan) + (volume.mesh_volume(frame)
+                                                      if frame is not None else 0.0),
+        "frame": frame,
     }
     return pan, info
+
+
+def _tray_ring(fp, fx, fy, r_in, r_out, z0, z1, coll):
+    """A band round the tray, between the outlines ``r_in`` and ``r_out`` out
+    from the object (from its footprint ``fp`` for a hugging tray, the rectangle
+    round it otherwise), from z0 to z1."""
+    if fp is not None:
+        outer, _a = fp.prism(r_out, z0, z1, coll, "MF_tring", single=True)
+        inner, _b = fp.prism(max(r_in, 0.05), z0 - 1.0, z1 + 1.0, coll, "MF_tring")
+    else:
+        zc, hz = (z0 + z1) * 0.5, z1 - z0
+        outer = util.add_box("MF_tring", Vector((0.0, 0.0, zc)),
+                             Vector((fx + 2 * r_out, fy + 2 * r_out, hz)), coll)
+        inner = util.add_box("MF_tring", Vector((0.0, 0.0, zc)),
+                             Vector((fx + 2 * r_in, fy + 2 * r_in, hz + 2.0)), coll)
+    util.boolean(outer, inner, 'DIFFERENCE')
+    util.remove_object(inner)
+    return outer
+
+
+def _lift_off_frame(pan, fp, fx, fy, margin, wall, floor, floor_top, rim_z, props, coll):
+    """Removable walls: cut the tray's walls off as a frame that lifts straight
+    off the cured silicone, leaving ``pan`` as the floor (with the embedded
+    object). A tongue along the middle of the frame's bottom edge sits in a
+    matching groove in the floor (with the fit clearance) so nothing leaks.
+    Returns the frame (MF_Mold_B), or None if the walls would not come off
+    cleanly (the tray is then left one piece)."""
+    g = min(1.5, floor * 0.5)
+    c = max(getattr(props, "fit_clearance", 0.2), 0.05)
+    # The cut runs a hair above the cavity floor, never ON it: a cut face lying
+    # exactly on the floor's face left a zero-thickness flap on the frame's
+    # underside reaching into the silicone space (Blender 5.2's booleans). The
+    # floor keeps a 0.05 mm step of wall - far below a print layer.
+    eps = 0.05
+    cut_z = floor_top + eps
+    bak = pan.data.copy()
+    try:
+        # the ring starts well inside the (empty) cavity, so its inner edge never
+        # grazes the cavity wall and leaves no saw-tooth on the frame's inner face
+        walls = _tray_ring(fp, fx, fy, max(margin - 1.0, margin * 0.5), margin + wall + 1.0,
+                           cut_z, rim_z + 1.0, coll)
+        tongue = _tray_ring(fp, fx, fy, margin + 0.25 * wall, margin + 0.75 * wall,
+                            floor_top - g, cut_z + 2.0 * eps, coll)
+        groove = _tray_ring(fp, fx, fy, margin + 0.25 * wall - c,
+                            margin + 0.75 * wall + c, floor_top - g - c, cut_z + 2.0 * eps,
+                            coll)
+        frame = util.duplicate_object(pan, "MF_Mold_B", coll)
+        cut = util.duplicate_object(walls, "MF_tring", coll)
+        util.boolean(cut, tongue, 'UNION')
+        util.boolean(frame, cut, 'INTERSECT')
+        util.remove_object(cut)
+        util.boolean(pan, walls, 'DIFFERENCE')
+        util.boolean(pan, groove, 'DIFFERENCE')
+        for o in (walls, tongue, groove):
+            util.remove_object(o)
+        util.remove_small_islands(frame)
+        util.remove_small_islands(pan)
+        if not (util.part_is_valid(frame)[0] and util.part_is_valid(pan)[0]):
+            raise RuntimeError("the walls did not come off cleanly")
+    except Exception:
+        for o in list(coll.objects):
+            if o.name.startswith(("MF_tring", "MF_Mold_B")):
+                util.remove_object(o)
+        cur = pan.data
+        pan.data = bak
+        if cur.users == 0:
+            bpy.data.meshes.remove(cur)
+        return None
+    if bak.users == 0:
+        bpy.data.meshes.remove(bak)
+    frame.name = "MF_Mold_B"
+    return frame
 
 
 def _add_skin_keys(inner, gap, shell, coll):

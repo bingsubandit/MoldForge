@@ -4,6 +4,9 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+- **Caught up with upstream 0.46.9** (Fix Flat Bottom, Skin Mold, Inner Cores,
+  Split with My Planes, unit fixes and the rest below). The fork's features sit on
+  top; STL export keeps its clean-up when it scales to millimetres.
 - **Fixed: wing alignment keys on the bottom-fill channel's pipe.** On a
   2-piece mold the keys were placed up both sides of the clamp wing, including
   the side the channel's pipe runs up, so cones stood on the pipe. That side
@@ -40,6 +43,228 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
   being glued or screwed - the counterpart of a Locking Base's Unite Base with
   Model. The plate is built without its pocket (whose fit clearance would leave
   a moat round the master), and the shells still key onto its collar.
+
+## 0.46.9 — Locking Base wings on a curved body
+
+Still reported with the curved model, on a Locking Base: a slot ran down
+between the clamp wing and the shell along the back of the body, so the wing
+stood apart from the wall there.
+
+- A Locking Base keeps the wings out of the air pocket under a model with a
+  hollow underside (a cap standing on its rim), or they bridge the socket
+  mouth. That pocket was taken as everything under the model over the plinth.
+  Under a body that leans out over its base, with a waist above it, that is
+  open space reaching all the way up to the overhang, and it was cut out of
+  the wings. A pocket now has to be closed in on the sides - looking out from
+  it, the model is there in nearly every direction - as inside a cap; a waist
+  under a lean is open, so the wing stays.
+- The pocket's rays now start clearly below the model; started on its bottom
+  face they could skip it and report a surface far above.
+- With no pocket at all the wings are not cut: cutting them with an empty
+  sheet left a slit beside the funnel.
+
+## 0.46.8 — no more spikes from a messy flat bottom
+
+Reported with a curved model: the clamp wings broke. The model's flat bottom,
+cut with a boolean and saved as STL, had zero-area triangles and vertices
+stacked on the same spot along its rim. Blender's even-thickness offset, which
+every shell, cavity and wing is grown with, threw 20 of those rim vertices far
+out: 270 mm from a 2 mm offset. MoldForge's guard only caught an offset flung
+out to near-infinity, so these got through at small distances. A direct mold
+with the default 3 mm wall came out half a metre wide in three broken pieces
+("the clamp wings are missing along about 100% of the seam"), and the wings,
+built from two such offsets, could be cut through.
+
+- A vertex the even offset moves more than 3 times the distance (a box corner
+  is 1.7) now gets a plain offset instead, along its own normal; every other
+  vertex keeps its even offset. That model's offsets now grow exactly by the
+  distance, and both mold types build clean, with whole wings.
+
+## 0.46.7 — clean parts on Blender 5.2
+
+The whole test suite now runs on Blender 5.2.3 as well as 5.1. Three checks
+failed only on 5.2, all where two faces of a build step met exactly: 5.1's
+booleans merged them cleanly, 5.2's leave zero-thickness leftovers.
+
+- **Lift-off tray walls:** the frame had a paper-thin flap on its underside
+  reaching 1 mm into the silicone space, where the cut lay exactly on the
+  cavity floor. The cut now runs 0.05 mm above the floor.
+- **Pour funnel:** the spout's neck and cup were two cones joined end to end,
+  and where the clamp wings met the shell in a deep crease the shell came out
+  with crossing faces. The spout is now one solid.
+- Zero-area slivers a boolean leaves (two corners at the very same point) are
+  welded away on every part, like the folded faces before.
+
+## 0.46.6 — no more lag in the panel
+
+- 0.46.5 made Blender laggy with a detailed model selected. Its check for a
+  model made in metres measured the model by walking every vertex, and the
+  panel runs it on every redraw - on every mouse move over the sidebar. That
+  took about 0.3 s a redraw on a 160,000-vertex model, seconds on a
+  multi-million-vertex sculpt. It now reads the bounding box Blender already
+  keeps (8 corners): a full redraw of every MoldForge panel is back to about
+  1 ms whatever the model's size. A test now draws every panel with a heavy
+  model and fails if anything walks its mesh.
+
+## 0.46.5 — models made in metres
+
+- A model made in metres (a game asset, a scan, an export from a metre-based
+  app) in Blender's untouched default scene is a few hundredths of a unit
+  across; MoldForge reads that scene as 1 unit = 1 mm, so it saw a model
+  under a millimetre and built a mold of 3 mm walls, wings and a funnel round
+  a speck ("Cast material 0.0 ml"). A model under 1 mm by that reading is now
+  taken as made in metres: the panel says so, with a **My model is in metres**
+  button, and Generate sets Scene Units > Length to Millimeters itself (so 1
+  unit reads as 1 metre, shown in mm) and says so. Nothing changes size. With
+  no unit system, chosen on purpose, it only warns.
+- The model line at the top of the panel shows a size under 10 mm with its
+  digits instead of "0 × 0 × 0 mm".
+- Fixed in 0.46.4's unit handling: when a build needed a second attempt (the
+  recovery ladder), the attempt lost the build scale, so in a 1 unit = 1 m
+  scene the mold could come out a thousand times too small.
+
+## 0.46.4 — the right size in any unit set-up
+
+In a scene set to Metric with Unit Scale 1.0 and Length in millimetres (or
+centimetres, or inches), a Blender unit is a metre. A 149 x 151 x 15 mm
+coaster is 0.149 units wide there, and its pour box came out about
+2400 x 1200 x 3000 mm (the tray about 960 x 960 x 900 mm). The panel's sizes
+were converted to Blender units, but the add-on's own fixed clearances and
+margins (a 10 mm margin, a 0.5 mm minimum rim, the funnel and wing minimums)
+were not, so in that scene they were metres.
+
+- The build now always runs in millimetres: on copies of the model, its
+  markers, split planes and cores scaled to mm, with everything it makes scaled
+  back to the scene at the end. The mold, the silicone estimate and the notes
+  come out the same as in a 1 unit = 1 mm scene. Scenes with Unit Scale 0.001,
+  no unit system, or Blender's untouched default (all 1 unit = 1 mm) build
+  exactly as before.
+- **Export** writes the STL files in millimetres (slicers read STL as mm); it
+  used to write raw Blender units, so a part from a 1 unit = 1 m scene loaded
+  1000 times too small.
+- **Fix Model's Flat Bottom** works in millimetres too: in such a scene it
+  used to find nothing to fix.
+- Add Split Plane, the vent and pour markers and the exploded layout size
+  themselves in millimetres instead of metres-sized in such a scene.
+- Checked on Blender 5.1 and 5.2.3.
+
+## 0.46.3 — the printer you pick stays in the panel
+
+- With **Cut to fit my printer** ticked, picking a printer made the Printer
+  row vanish from the main panel: it only showed while no height was set, and
+  a printer fills in its height. It now stays, with the printer's height
+  under it (greyed for a listed printer, editable for Custom), Supports and,
+  for a pour box, Cut positive too. Advanced > Printer Fit keeps the same
+  settings.
+
+## 0.46.2 — hugging tray walls that clear the whole object
+
+A Tray with the Hug outline took its outline from one slice through the
+middle of the object. On anything taller than a coin, a part that bulged out
+above or below that slice (a wide base, a brim, a C-shaped side) ran through
+the walls: the walls came out notched and ragged where the object poked
+through, the rim was uneven, and Lift-off walls could not cut the frame free.
+
+- The hugging outline is now the object's whole footprint seen from above
+  (everything straight below any part of it), grown by the Border. The walls
+  stand a full border's width clear of every part of the object.
+- The walls are truly vertical and the rim is flat all round.
+- The pan, its cavity and the lift-off frame's walls, tongue and groove all
+  come from that one footprint, so their outlines are parallel and never
+  cross: Lift-off walls now come off cleanly on such models too.
+- Building a hugging tray is faster (one footprint instead of a 3D offset
+  for every outline).
+
+## 0.46.1 — the new options where you look for them
+
+0.46.0's new options sat in the collapsed Advanced panels, where the user
+could not find them. They are now in the main MoldForge panel:
+
+- **Split with my planes** sits right under the Split row, with a + button
+  that adds a plane (Advanced > Parting keeps the details).
+- **Mark selected as inner core** is in the Add list (Advanced > Parting
+  keeps Core pull and Core stem). It asks first, and never marks the model
+  the mold is built from.
+- The label's **Logo** (an object, or an SVG file) sits under its text.
+- **Skin mold** was already under Mold type (Direct Printed Mold) and
+  **Lift-off walls** in the Tray settings; with Skin mold on, the Bottom row
+  now says it is the Open Bottom with the key plate instead of showing a
+  bottom the skin mold does not use.
+
+## 0.46.0 — inner cores, skin molds, free split planes, lift-off trays, logos
+
+Five things MoldBoxer has that MoldForge did not.
+
+- **Inner cores.** Model a core as its own mesh - a cylinder in a blind hole,
+  the shape of an undercut pocket or a hollow - select it and press Mark as
+  Core (Split section). Generate makes a removable core part (MF_Core_N): the
+  core, a square stem (it cannot turn) out through the mold wall along its
+  pull direction, and a handle outside. The pull direction is the axis whose
+  way out crosses the least of the model, out through the hole's opening,
+  or the one set in Core Pull. A direct mold gets the core's pocket and the
+  stem's channel cut, opened by the fit clearance; a pour box's positive
+  carries the core and stem, so the silicone forms the channel the core
+  slides into - no thin silicone pin to tear - and the shell gets a hole for
+  the stem.
+- **Skin molds.** Direct Printed Mold > Skin mold: for casting a thin flexible
+  skin (latex, silicone - a mask, a sleeve). A printed core, the model shrunk
+  inward by the skin thickness, stands on the key plate inside the mold on a
+  skirt cut from its own lower section (MF_SkinCore); the plate registers
+  into the halves as always, and the skin is poured into the gap. It comes
+  out open at the bottom, where the core is pulled out.
+- **Free split planes.** Split > Split with my planes, and Add Split Plane:
+  your own planes, as many as you like, moved and rotated anywhere. Every
+  plane cuts every piece it crosses. With Clamp Wings each plane gets a
+  flange (cut from the same stock as the regular wings) with bolt holes
+  across it; a direct mold gets ball keys on every cut.
+- **Lift-off tray walls.** Tray molds can print as a floor (with the embedded
+  object) and a separate frame that lifts straight off the cured silicone,
+  instead of prying the block out of a one-piece pan. A tongue under the
+  frame seats in a groove round the floor, with the fit clearance, so nothing
+  leaks; rectangular and hugging outlines both.
+- **Logos on the case.** The label can carry a logo - a Curve/Text object or
+  an SVG file - centred above the text like a badge, or on its own, cut in
+  or raised with the rest; Logo Height sets its size.
+
+## 0.45.0 — fix a badly meshed flat bottom
+
+A user's request: a boolean cut leaves the model's flat bottom with "no
+geometry" - one face that, once triangulated (an STL round trip), is a fan of
+needle-thin triangles - and MoldForge's own booleans then struggle with it.
+
+- **Fix Flat Bottom** (Mesh Prep, on by default): when the model's bottom is
+  stored as needle triangles, Generate rebuilds it on its working copy as an
+  even triangle mesh in the same outline, levelled within 0.3 mm; holes in it
+  and a hollow underside stay open. If the bottom's outline is broken (dead
+  ends, or it touches itself), or there are open edges within 2 mm of it, the
+  copy is sliced flat just above them - the walls there give a clean outline -
+  and that is filled. Generate says what it did. Your model is not changed. A
+  clean single-polygon bottom is left alone.
+- **Fix Model's Flat Bottom** button (Mesh Prep): does the same to the
+  selected model itself, with undo.
+- **Heal closes tiny holes** (up to 12 edges) in Generate's working copy.
+- **Fixed: a hollow underside stopped the Locking Base uniting with the
+  positive** ("the sawtooth base could not be boolean-united ... messy source
+  mesh"). The plinth closes the hollow, and the sealed pocket inside the
+  union was read as a second piece, so the union was thrown away. The pocket
+  is now filled. On the user's model, with the bottom rebuilt and one tiny
+  hole closed, the base now unites.
+
+## 0.44.3 — the curved seam on a Locking Base is a choice
+
+- **A Locking Base has its own Contoured switch, off by default.** 0.44.0 made
+  every Locking Base follow the contoured parting whenever Contoured was
+  ticked (the default), so even a model that looks straight came out with two
+  halves curving for no visible reason. Off, a Locking Base gets one flat seam
+  straight through, as before 0.44. On, the seam follows a curved model and
+  stays flat through the plinth. Split shows this switch as Contoured
+  whenever the bottom is a Locking Base; the general one still decides every
+  other bottom. When a flat seam leaves a half in pieces, Generate now points
+  to the switch.
+- **Fewer folded faces.** The clean-up pass first welds the slits a later cut
+  can leave (a crack sealed by a zero-area face over pairs of vertices at the
+  very same spot): seen where the flat seam's cut ran past a label on a
+  knobbly shell.
 
 ## 0.44.2 — the user's model: no stray shells, the label found
 

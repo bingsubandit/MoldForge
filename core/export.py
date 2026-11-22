@@ -4,12 +4,15 @@ import os
 import struct
 
 import bpy
+from mathutils import Matrix
 
 from . import util
 
 
-def export_stl(obj, filepath):
-    """Write ``obj`` (with its world transform applied) as a binary STL.
+def export_stl(obj, filepath, scale=1.0):
+    """Write ``obj`` (with its world transform applied) as a binary STL, its
+    coordinates times ``scale``: STL has no units and slicers read millimetres,
+    so the caller passes the scene's millimetres per Blender unit.
 
     A plain mesh is first made exactly what the file will hold
     (``util.finish_for_export``, kept only when it leaves it cleaner), so
@@ -17,13 +20,13 @@ def export_stl(obj, filepath):
     STL. Positions come from ``util.stl_positions``, the numbers that check
     reads, so a part that checks clean writes clean."""
     if obj.type == 'MESH' and not obj.modifiers:
-        util.finish_for_export(obj)
+        util.finish_for_export(obj, scale)
     deps = bpy.context.evaluated_depsgraph_get()
     eval_obj = obj.evaluated_get(deps)
     me = eval_obj.to_mesh()
     try:
         me.calc_loop_triangles()
-        pos = util.stl_positions(eval_obj, me)
+        pos = util.stl_positions(eval_obj, me, scale)   # evaluated mesh, in mm
         tris = me.loop_triangles
 
         with open(filepath, 'wb') as f:
@@ -55,11 +58,11 @@ def _safe_name(name):
     return cleaned.strip("._") or "part"
 
 
-def export_objects(objects, directory):
+def export_objects(objects, directory, scale=1.0):
     os.makedirs(directory, exist_ok=True)
     written = []
     for obj in objects:
         path = os.path.join(directory, f"{_safe_name(obj.name)}.stl")
-        export_stl(obj, path)
+        export_stl(obj, path, scale)
         written.append(path)
     return written

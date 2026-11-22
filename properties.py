@@ -14,6 +14,7 @@ from bpy.props import (
     EnumProperty,
     FloatProperty,
     IntProperty,
+    PointerProperty,
     StringProperty,
 )
 from mathutils import Vector
@@ -177,6 +178,19 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
         ],
         default='HUG',
     )
+    skin_core: BoolProperty(
+        name="Skin Mold",
+        description="Cast a thin flexible SKIN (latex, silicone - a mask, a sleeve) "
+                    "in a direct printed mold: a printed core - the model shrunk "
+                    "inward by the skin thickness - stands on the key plate inside the "
+                    "mold, and you pour into the gap. The skin comes out open at the "
+                    "bottom, where the core is pulled out. Uses an Open Bottom with the "
+                    "key plate",
+        default=False,
+    )
+    skin_thickness: _dist("Skin Thickness", 2.0,
+                          "How thick the cast skin is: the gap between the printed "
+                          "core and the mold", mn=0.4, soft=10.0)
     skin_keys: BoolProperty(
         name="Glove Skin Keys",
         description="Glove / mother-mold workflow: raise registration bumps on the "
@@ -223,11 +237,19 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
         items=[
             ('RECT', "Rectangular", "A rectangular pan around the object's footprint "
              "— simplest and strongest"),
-            ('HUG', "Hug (rounded)", "Walls follow the object's outline with rounded "
-             "corners — uses less silicone and plastic, especially for round or "
-             "irregular shapes"),
+            ('HUG', "Hug (rounded)", "Walls follow the object's outline seen from above "
+             "(every part of it, a Border's width clear), with rounded corners — uses "
+             "less silicone and plastic, especially for round or irregular shapes"),
         ],
         default='RECT',
+    )
+    tray_removable: BoolProperty(
+        name="Lift-off Walls",
+        description="Print the tray as a floor and a separate frame: lift the frame "
+                    "straight off the cured silicone instead of prying the block out "
+                    "of a one-piece pan. A tongue under the frame seats in a groove in "
+                    "the floor so nothing leaks",
+        default=False,
     )
     tray_wall: _dist("Pan Wall", 2.5,
                      "Thickness of the printed tray walls", mn=0.4, soft=8.0)
@@ -439,6 +461,14 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
                     "(exported with the shells) and leave your model untouched - e.g. to "
                     "print the base on its own and attach the master to it",
         default=True,
+    )
+    lock_contoured: BoolProperty(
+        name="Contoured on Locking Base",
+        description="Let the seam follow a curved model on a Locking Base (it stays "
+                    "flat through the plinth, so the socket still pulls straight off). "
+                    "Off: one flat seam straight through - best for straight models. "
+                    "Turn it on when a curved model's half comes out in pieces",
+        default=False,
     )
 
     # --- Clamp wings ---------------------------------------------------- #
@@ -668,6 +698,29 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
                     "print off the plate (resin prints rarely sit flat). This is "
                     "reserved out of Max Print Height, so every level still fits "
                     "WITH its supports")
+    core_pull: EnumProperty(
+        name="Core Pull",
+        description="Which way the inner cores come out (their stems run this way, "
+                    "through the mold wall)",
+        items=[
+            ('AUTO', "Auto", "Each core comes out the way that crosses the least of "
+                             "the model - out through its hole's opening"),
+            ('+Z', "Up", ""), ('-Z', "Down", ""),
+            ('+X', "+X", ""), ('-X', "-X", ""), ('+Y', "+Y", ""), ('-Y', "-Y", ""),
+        ],
+        default='AUTO',
+    )
+    core_stem: _dist("Core Stem", 0.0,
+                     "Width of the cores' square stems (0 = from each core's size)",
+                     mn=0.0, soft=20.0)
+    use_split_planes: BoolProperty(
+        name="Split with My Planes",
+        description="Cut the mold along your own split planes (Add Split Plane: move "
+                    "and rotate each one anywhere, add as many as you like) instead of "
+                    "the standard split. With Clamp Wings on, every plane gets a "
+                    "bolted flange; a direct mold gets alignment keys on every cut",
+        default=False,
+    )
     contoured: BoolProperty(
         name="Contoured Parting",
         description="Parting surface follows the model's mid-profile (self-"
@@ -800,6 +853,14 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
         description="Merge doubles, drop loose geometry and recalculate normals first",
         default=True,
     )
+    fix_bottom: BoolProperty(
+        name="Fix Flat Bottom",
+        description="When the model's flat bottom is badly meshed - one face of "
+                    "needle-thin triangles, as a boolean cut leaves it - rebuild it as "
+                    "an even mesh on Generate's working copy (your model is not "
+                    "changed; the Fix Flat Bottom button fixes the model itself)",
+        default=True,
+    )
     decimate: BoolProperty(name="Decimate", default=False)
     decimate_ratio: FloatProperty(name="Ratio", default=0.5, min=0.1, max=1.0, subtype='FACTOR')
     voxel_safe: BoolProperty(
@@ -905,6 +966,23 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
     label_depth: _dist("Label Depth", 0.6,
                        "How deep the letters are cut into the plaque, or how far "
                        "they stand out of it when raised", mn=0.2, soft=2.0)
+    label_logo: StringProperty(
+        name="Logo File",
+        description="An SVG logo for the label, centred above the text (or on its "
+                    "own when the text is empty). Use filled paths",
+        default="", subtype='FILE_PATH',
+    )
+    label_logo_obj: PointerProperty(
+        name="Logo Object",
+        description="A Curve or Text object to use as the label's logo (instead of "
+                    "the SVG file)",
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type in {'CURVE', 'FONT'},
+    )
+    label_logo_size: _dist("Logo Height", 12.0,
+                           "Height of the logo on the label; it shrinks with the "
+                           "letters when the label has to be made smaller",
+                           mn=2.0, soft=40.0)
     label_style: EnumProperty(
         name="Label Style",
         description="How the letters are made",

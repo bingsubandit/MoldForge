@@ -110,9 +110,19 @@ def _model_status(context, props):
         return False, "That is a mold part - select your model", 'ERROR'
     mpu = _mm_per_unit(context)
     d = obj.dimensions
+    if units.looks_like_metres(context.scene, obj):
+        icon = 'ERROR'              # under 1 mm: say the number, not "0 x 0 x 0"
+    else:
+        icon = 'MESH_DATA'
     return (True,
-            f"{obj.name}   {d.x * mpu:.0f} × {d.y * mpu:.0f} × {d.z * mpu:.0f} mm",
-            'MESH_DATA')
+            f"{obj.name}   {_mm(d.x * mpu)} × {_mm(d.y * mpu)} × {_mm(d.z * mpu)} mm",
+            icon)
+
+
+def _mm(v):
+    """A size for the status line: whole millimetres, or enough digits to show
+    a size under 10 mm as more than 0."""
+    return f"{v:.0f}" if v >= 10.0 else f"{v:.2g}"
 
 
 LABEL_SPLIT = 0.44    # label column share of a row: room for "Silicone thickness"
@@ -192,11 +202,21 @@ def summary_shell(props):
     return out
 
 
+def _contoured_key(props):
+    """The Contoured switch in force: a Locking Base has its own (off by
+    default - a flat seam straight through), every other bottom the general one."""
+    if props.base_style == 'LOCK' and props.box_style == 'POUR_BOX':
+        return "lock_contoured"
+    return "contoured"
+
+
 def summary_parting(props):
+    if getattr(props, "use_split_planes", False):
+        return "my planes"
     if props.parts_count >= 3:
         out = f"{props.parts_count} wedges"
     else:
-        out = "2 pieces · " + ("contoured" if props.contoured
+        out = "2 pieces · " + ("contoured" if getattr(props, _contoured_key(props))
                                else f"{props.key_count} keys")
     if props.split_horizontal:
         out += " · h-seam"
@@ -272,18 +292,35 @@ class MOLDFORGE_PT_main(_MFPanel, bpy.types.Panel):
         # What Generate will work on.
         ok, text, icon = _model_status(context, props)
         layout.label(text=text, icon=icon)
+        if ok and units.looks_like_metres(context.scene, context.active_object):
+            # a model made in metres reads as under a millimetre by the
+            # 1 unit = 1 mm convention: the mold would swallow a speck
+            warn = layout.column(align=True)
+            warn.label(text="Under 1 mm? It was made in metres", icon='BLANK1')
+            if context.scene.unit_settings.system != 'NONE':
+                hint = warn.row()
+                hint.active = False
+                hint.label(text="Generate reads it in metres", icon='BLANK1')
+            warn.operator("moldforge.read_as_metres", text="My model is in metres",
+                          icon='DRIVER_DISTANCE')
 
         col = layout.column()
         _field(col, "Mold type").prop(props, "box_style", text="")
         if props.box_style == 'SOLID':
             _field(col, "Shape").prop(props, "solid_shape", expand=True)
+            col.prop(props, "skin_core", text="Skin mold (printed core)")
+            if props.skin_core:
+                _field(col, "Skin").prop(props, "skin_thickness", text="")
         if tray:
             _field(col, "Mode").prop(props, "tray_mode", text="")
             self._tray(layout, props, context)
             self._generate(layout, context, ok)
             return
 
-        _field(col, "Bottom").prop(props, "base_style", text="")
+        if props.box_style == 'SOLID' and props.skin_core:
+            _field(col, "Bottom").label(text="Open + key plate (skin)")
+        else:
+            _field(col, "Bottom").prop(props, "base_style", text="")
         if props.base_style == 'LOCK' and not pour:
             layout.label(text="Locking Base is for the Silicone Pour Box",
                          icon='ERROR')
@@ -312,11 +349,24 @@ class MOLDFORGE_PT_main(_MFPanel, bpy.types.Panel):
             row.prop(props, "sprue_radius", text="")
             row.prop(props, "big_throat", text="", icon='FULLSCREEN_ENTER',
                      toggle=True)
-        if props.parts_count == 2:
+        if props.use_split_planes:
+            _field(col, "Split").label(text="my planes")
+        elif props.parts_count == 2:
             # No text="" here: on an expanded enum that blanks the buttons.
             _field(col, "Split").prop(props, "split_axis", expand=True)
         else:
             _field(col, "Pieces").prop(props, "parts_count", text="")
+        # Your own split planes: any number, anywhere (Parting has the details)
+        from .core import planes as mf_planes
+        prow = layout.row(align=True)
+        prow.prop(props, "use_split_planes", text="Split with my planes")
+        if props.use_split_planes:
+            prow.operator("moldforge.add_split_plane", text="", icon='ADD')
+            n_pl = len(mf_planes.plane_objects())
+            hint = layout.row()
+            hint.active = False
+            hint.label(text=f"{n_pl} plane{'s' if n_pl != 1 else ''} - move & rotate them"
+                       if n_pl else "Add a plane with +", icon='INFO')
         if props.sprue:
             flags = _funnel_flags(props, mold_caps(context))
             if flags and (flags[2] or flags[3]):
@@ -352,11 +402,41 @@ class MOLDFORGE_PT_main(_MFPanel, bpy.types.Panel):
             tog.prop(props, "stand_legs", text="Stand legs (for casting)")
         tog.prop(props, "label_on", text="Label on the case")
         if props.label_on and props.box_style != 'TRAY':
-            _field(layout.column(), "Label").prop(props, "label_text", text="")
+            lcol = layout.column(align=True)
+            _field(lcol, "Label").prop(props, "label_text", text="")
+            _field(lcol, "Logo").prop(props, "label_logo_obj", text="")
+            if props.label_logo_obj is None:
+                _field(lcol, "Logo SVG").prop(props, "label_logo", text="")
+            tog = layout.column(align=True)
+        if props.box_style != 'TRAY':
+            # Inner cores: mark a modelled core mesh (Parting has pull & stem)
+            from .core import cores as mf_cores
+            n_cores = len(mf_cores.core_objects())
+            crow = layout.row(align=True)
+            crow.operator("moldforge.mark_core", text="Mark selected as inner core",
+                          icon='MESH_CYLINDER')
+            if n_cores:
+                cinfo = layout.row()
+                cinfo.active = False
+                cinfo.label(text=f"{n_cores} inner core{'s' if n_cores != 1 else ''} "
+                                 f"- pull & stem in Advanced > Parting")
             tog = layout.column(align=True)
         tog.prop(props, "printer_fit", text="Cut to fit my printer")
-        if props.printer_fit and props.max_print_height <= 0:
-            _field(layout.column(), "Printer").prop(props, "printer_preset", text="")
+        if props.printer_fit:
+            # stays put once a printer is picked (it used to hide itself as soon
+            # as the height was filled in); a preset's height shows greyed
+            pcol = layout.column(align=True)
+            _field(pcol, "Printer").prop(props, "printer_preset", text="")
+            hrow = _field(pcol, "Max height")
+            hrow.enabled = props.printer_preset == 'CUSTOM'
+            hrow.prop(props, "max_print_height", text="")
+            _field(pcol, "Supports").prop(props, "support_clearance", text="")
+            if pour:
+                pcol.prop(props, "fit_positive", text="Cut positive too")
+            if props.max_print_height <= 0:
+                hint = layout.row()
+                hint.active = False
+                hint.label(text="Pick a printer or type its height", icon='INFO')
 
         self._generate(layout, context, ok)
 
@@ -382,6 +462,7 @@ class MOLDFORGE_PT_main(_MFPanel, bpy.types.Panel):
             _field(col, "Pour depth").prop(props, "tray_depth", text="")
             _field(col, "Pan wall").prop(props, "tray_wall", text="")
             _field(col, "Pan floor").prop(props, "tray_floor", text="")
+            layout.prop(props, "tray_removable", text="Lift-off walls")
 
     @staticmethod
     def _generate(layout, context, ok):
@@ -615,14 +696,40 @@ class MOLDFORGE_PT_parting(_MFSub, bpy.types.Panel):
         props = context.scene.moldforge
         is_block = (props.box_style == 'SOLID' and props.solid_shape == 'BLOCK')
 
+        from .core import cores as mf_cores
+        n_cores = len(mf_cores.core_objects())
+        row = layout.row(align=True)
+        row.operator("moldforge.mark_core", icon='MESH_CYLINDER')
+        if n_cores:
+            sub = layout.column(align=True)
+            sub.prop(props, "core_pull", text="Core pull")
+            sub.prop(props, "core_stem", text="Core stem")
+            info = layout.column(align=True)
+            info.active = False
+            info.label(text=f"{n_cores} inner core{'s' if n_cores != 1 else ''} marked")
+        layout.separator()
+        layout.prop(props, "use_split_planes", text="Split with my planes")
+        if props.use_split_planes:
+            from .core import planes as mf_planes
+            n_pl = len(mf_planes.plane_objects())
+            layout.operator("moldforge.add_split_plane", icon='MESH_PLANE')
+            sub = layout.column(align=True)
+            sub.active = False
+            sub.label(text=f"{n_pl} plane{'s' if n_pl != 1 else ''} - move & rotate them"
+                      if n_pl else "No planes yet - add one")
+            layout.prop(props, "split_horizontal", text="Horizontal split")
+            if props.split_horizontal:
+                layout.prop(props, "split_z_offset", text="Seam height")
+            return
         layout.prop(props, "parts_count", text="Pieces")
         if props.parts_count >= 3:
             if is_block or not props.wings:
                 layout.prop(props, "key_count", text="Seam pins")
         else:
             layout.prop(props, "split_offset", text="Offset")
-            layout.prop(props, "contoured", text="Contoured")
-            if not props.contoured:
+            ckey = _contoured_key(props)
+            layout.prop(props, ckey, text="Contoured")
+            if not getattr(props, ckey):
                 layout.prop(props, "key_count", text="Keys")
                 if props.key_count > 0 and not props.wings:
                     layout.prop(props, "registration", text="Key type")
@@ -804,6 +911,9 @@ class MOLDFORGE_PT_mesh(_MFSub, bpy.types.Panel):
         layout = self._body()
         props = context.scene.moldforge
         layout.prop(props, "heal", text="Heal mesh")
+        layout.prop(props, "fix_bottom", text="Fix flat bottom")
+        layout.operator("moldforge.fix_bottom", text="Fix Model's Flat Bottom",
+                        icon='MOD_TRIANGULATE')
         layout.prop(props, "decimate", text="Decimate")
         if props.decimate:
             layout.prop(props, "decimate_ratio", text="Ratio")
@@ -835,6 +945,11 @@ class MOLDFORGE_PT_export(_MFSub, bpy.types.Panel):
         layout.prop(props, "label_on", text="Label")
         if props.label_on:
             layout.prop(props, "label_text", text="Text")
+            layout.prop(props, "label_logo_obj", text="Logo")
+            if props.label_logo_obj is None:
+                layout.prop(props, "label_logo", text="Logo SVG")
+            if props.label_logo_obj is not None or props.label_logo:
+                layout.prop(props, "label_logo_size", text="Logo height")
             layout.prop(props, "label_style", text="Style")
             col = layout.column(align=True)
             col.prop(props, "label_size", text="Letter height")

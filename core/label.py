@@ -88,6 +88,56 @@ def text_solid(lines, height, depth, coll):
     return solid
 
 
+def logo_solid(sources, coll):
+    """The logo (Curve/Text objects, an imported SVG) as one flat solid in the
+    label's frame: 1 unit tall, centred, from z = 0 to 1. None if it has no
+    filled shapes."""
+    from .artwork import design_to_solid
+    try:
+        solid = design_to_solid(sources, 1.0, coll)
+    except ValueError:
+        return None
+    mn, mx = util.world_bbox(solid)
+    hgt = max(mx.y - mn.y, 1e-6)
+    zt = max(mx.z - mn.z, 1e-6)
+    c = (mn + mx) * 0.5
+    solid.data.transform(Matrix.Diagonal((1.0 / hgt, 1.0 / hgt, 1.0 / zt, 1.0))
+                         @ Matrix.Translation((-c.x, -c.y, -mn.z)))
+    solid.data.update()
+    solid.name = "MF_labellogo"
+    return solid
+
+
+def art_solid(lines, logo, height, depth, coll, logo_ratio=2.4):
+    """What the label carries, as one flat solid like ``text_solid``: the text
+    with letters ``height`` tall, the logo (from ``logo_solid``) ``logo_ratio``
+    times that tall, centred above the text like a badge (a narrow label fits
+    across a round shell), or either alone. None if there is nothing."""
+    txt = text_solid(lines, height, depth, coll) if lines else None
+    art = None
+    if logo is not None:
+        art = util.duplicate_object(logo, "MF_labeltext", coll)
+        lh = height * logo_ratio
+        art.data.transform(Matrix.Diagonal((lh, lh, depth, 1.0)))
+        art.data.update()
+    if art is None:
+        return txt
+    if txt is None:
+        return art
+    amn, amx = util.world_bbox(art)
+    tmn, tmx = util.world_bbox(txt)
+    gap = height * 0.6
+    tall = (amx.y - amn.y) + gap + (tmx.y - tmn.y)
+    art.data.transform(Matrix.Translation((-(amn.x + amx.x) * 0.5,
+                                           tall * 0.5 - amx.y, 0.0)))
+    txt.data.transform(Matrix.Translation((-(tmn.x + tmx.x) * 0.5,
+                                           -tall * 0.5 - tmn.y, 0.0)))
+    art.data.update()
+    txt.data.update()
+    util.join_meshes(txt, art)
+    return txt
+
+
 def _frame(out, vertical):
     """Text axes on a face looking out along ``out``: reading direction, letter
     up, and the face normal - readable from outside."""
@@ -307,7 +357,7 @@ def _drape_text(txt, shell, base):
     me.update()
 
 
-def add_label(mold, model, cavity, out, lines, props, coll):
+def add_label(mold, model, cavity, out, lines, props, coll, logo=None):
     """Put a plaque that follows the shell on the outside of ``mold`` facing
     ``out`` (a horizontal unit vector: the middle of one shell's face),
     carrying ``lines`` raised or cut in. ``cavity`` is the cavity solid, so
@@ -321,7 +371,8 @@ def add_label(mold, model, cavity, out, lines, props, coll):
     zspan = mmx.z - mmn.z
     inset, line_w = 1.0, 0.5                       # the frame line, in from the edge
     margin = inset + line_w + 1.6                  # edge to text
-    probe = text_solid(lines, H0, 1.0, coll)
+    ratio = max(getattr(props, "label_logo_size", 12.0), 1.0) / H0
+    probe = art_solid(lines, logo, H0, 1.0, coll, ratio)
     if probe is None:
         return False, "label skipped - the text has no letters"
     pmn, pmx = util.world_bbox(probe)
@@ -418,7 +469,7 @@ def add_label(mold, model, cavity, out, lines, props, coll):
             line = _object("MF_labeltext", coll, lambda bm: _ring(
                 bm, shell, fo, fi, proud - frame_d, proud + 0.5))
         # the text: standing ``depth`` proud of the face, or cut ``depth`` in
-        txt = text_solid(lines, H, depth + (0.1 if raised else 0.5), coll)
+        txt = art_solid(lines, logo, H, depth + (0.1 if raised else 0.5), coll, ratio)
         if txt is None:
             raise RuntimeError("no text")
         _drape_text(txt, shell, proud - 0.1 if raised else proud - depth)
@@ -447,5 +498,8 @@ def add_label(mold, model, cavity, out, lines, props, coll):
     how = "up the shell" if vertical else "across the shell"
     small = f" at {H:.1f} mm (shrunk to fit)" if H < H0 - 1e-6 else ""
     kind = "raised" if raised else "cut in"
-    return True, f"label {kind} {how}{small}: " + " / ".join(lines)
+    what = " / ".join(lines)
+    if logo is not None:
+        what = "the logo" + (" and " + what if what else "")
+    return True, f"label {kind} {how}{small}: " + what
 

@@ -2854,7 +2854,8 @@ def main():
     print("\n=== Locking Base on a contoured parting ===")
     reset_scene()
     rlc = pipeline.build_mold_system(_c_toy("CToyC"), _over(default_props(), **dict(
-        cb_cfg, base_style='LOCK', split_axis='X', contoured=True)))
+        cb_cfg, base_style='LOCK', split_axis='X', contoured=True,
+        lock_contoured=True)))   # 0.46: a Locking Base has its own switch
     bpy.context.view_layer.update()
     names_lc = sorted(q.name for q in rlc["parts"])
     halves_lc = [q for q in rlc["parts"] if q.name in ("MF_Mold_A", "MF_Mold_B")]
@@ -4703,8 +4704,11 @@ def main():
     _set_units('METRIC', 1.0, 'MILLIMETERS')   # real units, mpu = 1000 -> 1 mm = 0.001 units
     bp = mfunits.build_props(_over(default_props(), wall_thickness=3.0, shell_wall=2.0,
                                    parts_count=3), bpy.context.scene)
-    check(abs(bp.wall_thickness - 0.003) < 1e-9 and abs(bp.shell_wall - 0.002) < 1e-9,
-          f"build_props: 3 mm wall -> {bp.wall_thickness:g} units at scale 1")
+    # 0.46.4: the build runs in millimetres, scaled by build_scale.
+    check(abs(bp.wall_thickness - 3.0) < 1e-9 and abs(bp.shell_wall - 2.0) < 1e-9
+          and abs(bp.build_scale - 1000.0) < 1e-6,
+          f"build_props: 3 mm wall stays {bp.wall_thickness:g} mm, build_scale "
+          f"{bp.build_scale:g}")
     check(bp.parts_count == 3, "build_props leaves non-length fields alone")
 
     # Geometry invariance: the SAME mm sizes on the SAME real object give a proportional

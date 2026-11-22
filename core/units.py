@@ -58,6 +58,53 @@ def mm_per_unit(scene):
     return (s * 1000.0) if s > 0.0 else 1.0
 
 
+def convention_mm(scene):
+    """True when MoldForge reads 1 unit = 1 mm by convention (no unit system,
+    or Blender's untouched default scene) rather than from units the user set."""
+    us = getattr(scene, "unit_settings", None)
+    if us is None or us.system == 'NONE':
+        return True
+    return (us.system == 'METRIC' and abs(us.scale_length - 1.0) < 1e-9
+            and getattr(us, "length_unit", 'METERS') in ('METERS', 'ADAPTIVE'))
+
+
+TINY_MM = 1.0     # a model under this by the convention was made in metres
+
+
+def looks_like_metres(scene, obj):
+    """True when ``obj`` would read as under a millimetre by the 1 unit = 1 mm
+    convention: nobody molds that, so it was made in metres (a game asset, a
+    scan, a model exported from a metre-based app). Blender itself already
+    reads such a scene in metres - it shows the model as a few centimetres."""
+    if obj is None or getattr(obj, "type", None) != 'MESH' or not obj.data.polygons:
+        return False
+    if not convention_mm(scene):
+        return False
+    big = world_size(obj)
+    return 0.0 < big < TINY_MM
+
+
+def world_size(obj):
+    """``obj``'s largest world-space extent, from its CACHED bounding box (8
+    corners). The panel asks on every redraw - on every mouse move over the
+    sidebar - so it must never walk the mesh: a per-vertex scan here took
+    0.3 s a redraw on a 160k-vertex model and made Blender crawl (0.46.5)."""
+    from mathutils import Vector
+    mw = obj.matrix_world
+    pts = [mw @ Vector(c) for c in obj.bound_box]
+    return max(max(q[i] for q in pts) - min(q[i] for q in pts) for i in range(3))
+
+
+def read_as_metres(scene):
+    """Set the scene to read 1 unit = 1 m, with lengths shown in millimetres
+    (Metric, Unit Scale 1.0, Length Millimeters): Blender's own reading of a
+    model made in metres, which MoldForge then follows."""
+    us = scene.unit_settings
+    us.system = 'METRIC'
+    us.scale_length = 1.0
+    us.length_unit = 'MILLIMETERS'
+
+
 def units_per_mm(scene):
     """Blender units per millimetre (inverse of ``mm_per_unit``)."""
     mpu = mm_per_unit(scene)
@@ -65,15 +112,18 @@ def units_per_mm(scene):
 
 
 def build_props(props, scene):
-    """A plain snapshot of ``props`` with every length field converted from millimetres
-    to Blender units for ``scene`` - so the build, which runs in Blender units, is correct
-    whatever the scene's unit system. Non-length fields are copied through unchanged.
+    """A plain snapshot of ``props`` for the build, with the sizes left in
+    millimetres and ``build_scale`` set to the scene's millimetres per Blender
+    unit. The build runs in millimetres - the panel's fields and the fixed
+    clearances in the code alike - on copies scaled by ``build_scale``, and scales
+    what it makes back to scene units (``pipeline.staged_build``). Converting only
+    the fields to Blender units left those fixed sizes in metres in a
+    1 unit = 1 m scene: a coaster's mold came out metres wide.
 
     Reads the field list from the PropertyGroup definition so it can't drift out of sync.
     """
     from .. import properties
 
-    upm = units_per_mm(scene)
     ns = types.SimpleNamespace()
     try:
         names = list(properties.MoldForgeProperties.__annotations__.keys())
@@ -84,10 +134,9 @@ def build_props(props, scene):
         val = getattr(props, name, missing)
         if val is missing:
             continue            # absent -> let the build use its own getattr default
-        if name in LENGTH_PROPS and isinstance(val, (int, float)) and not isinstance(val, bool):
-            val = val * upm
         setattr(ns, name, val)
-    ns.mm_per_unit = mm_per_unit(scene)        # the label turns volumes into ml/g
+    ns.build_scale = mm_per_unit(scene)
+    ns.mm_per_unit = 1.0         # the build's volumes are mm3 (the label's ml/g)
     return ns
 
 
