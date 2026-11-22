@@ -794,6 +794,8 @@ class MOLDFORGE_PT_mesh(_MFSub, bpy.types.Panel):
             bits.append(f"decimate {props.decimate_ratio:g}")
         if props.voxel_safe:
             bits.append(f"remesh {props.voxel_size:g}")
+        if props.mold_detail != 1.0:
+            bits.append(f"detail {props.mold_detail:g}x")
         self._summary(self.layout, " · ".join(bits))
 
     def draw(self, context):
@@ -806,6 +808,7 @@ class MOLDFORGE_PT_mesh(_MFSub, bpy.types.Panel):
         layout.prop(props, "voxel_safe", text="Safe remesh")
         if props.voxel_safe:
             layout.prop(props, "voxel_size", text="Voxel size")
+        layout.prop(props, "mold_detail", text="Mold detail")
 
 
 class MOLDFORGE_PT_export(_MFSub, bpy.types.Panel):

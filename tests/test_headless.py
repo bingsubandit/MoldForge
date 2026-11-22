@@ -676,6 +676,37 @@ def main():
           and all(mfutil.part_is_valid(q)[0] for q in rk_off["parts"]),
           "radial wedges without wings get no wing keys")
 
+    # --- Mold Detail: a holed (non-manifold) model gets the cleanup voxel pass, and
+    # the shell and wings are rebuilt on a voxel grid; Mold Detail 2 halves that
+    # voxel, so the same mold comes out with many more, finer faces.
+    print("\n=== Mold Detail ===")
+
+    def holed_master():
+        m = make_master("Model")
+        bm = bmesh.new()
+        bm.from_mesh(m.data)
+        bm.faces.ensure_lookup_table()
+        bmesh.ops.delete(bm, geom=[bm.faces[0]], context='FACES_ONLY')
+        bm.to_mesh(m.data)
+        bm.free()
+        return m
+
+    md_kw = dict(box_style='POUR_BOX', base_style='FOLLOW', wings=True, sprue=False,
+                 vent_count=0, split_axis='X', wing_keys='NONE')
+    md = {}
+    for level in (1.0, 2.0):
+        reset_scene()
+        r_ = pipeline.build_mold_system(holed_master(),
+                                        _over(default_props(), mold_detail=level, **md_kw))
+        md[level] = (all(mfutil.part_is_valid(q)[0] for q in r_["parts"]),
+                     sum(part_face_count(q) for q in r_["parts"]),
+                     sum(volume.mesh_volume(q) for q in r_["parts"]))
+    check(md[1.0][0] and md[2.0][0], "Mold Detail 1 and 2: all parts valid")
+    check(md[2.0][1] > md[1.0][1] * 2.0,
+          f"Mold Detail 2 builds a much finer mold ({md[1.0][1]} -> {md[2.0][1]} faces)")
+    check(abs(md[2.0][2] - md[1.0][2]) < md[1.0][2] * 0.1,
+          f"...of the same shape (volume {md[1.0][2]:.0f} vs {md[2.0][2]:.0f} u³)")
+
     # --- Sprue is a raised pour funnel (stands proud of the mold) + stays valid
     print("\n=== Pour funnel ===")
     reset_scene()

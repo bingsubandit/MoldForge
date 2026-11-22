@@ -132,6 +132,7 @@ all) when the auto fit isn't what you want.
 | Sprue | **Pour Points** + **Center Sprue** | 1–4 funnels (more helps fill tall figures); centre them on the seam instead of the model's high point |
 | Sprue | **Air Vents** + **Vent Radius** | 0–8 thin channels from the cavity's high points to the outside |
 | Prep | **Heal / Decimate / Safe Remesh** | Clean up messy, heavy, or non‑manifold meshes |
+| Prep | **Mold Detail** | Polygon density of the mold body and clamp wings where they're rebuilt on a voxel grid (messy or heavy models): 2 (default) is twice as fine as the original 1, up to 8. The positive always keeps full detail |
 | Material | **Silicone / Cast / Print density** | g/ml, used for the weight estimate (RTV silicone ≈ 1.1–1.2, resin ≈ 1.1, PLA ≈ 1.24) |
 
 The panel reports the **silicone** (the pour amount, or the thin skin for a glove

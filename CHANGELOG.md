@@ -17,6 +17,10 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
   and stay off the bottom-fill channel's seam.
 - **Changed: wing alignment keys are on by default** (Cone). Set Alignment to
   None for the old behaviour. A preset that saved None keeps it.
+- **New: Mold Detail** (Mesh Prep). A messy or heavy model's mold body and
+  clamp wings are rebuilt on a voxel grid sized from the wall, which came out
+  coarse with jagged edges. Mold Detail divides that voxel: the default 2 is
+  twice as fine (about 4x the polygons, slower), 1 is the old setting, up to 8.
 
 ## 0.44.2 — the user's model: no stray shells, the label found
 

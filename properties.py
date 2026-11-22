@@ -801,6 +801,16 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
     )
     voxel_size: _dist("Remesh Voxel", 1.0,
                       "Voxel size for Safe Remesh (smaller = finer, slower)", mn=0.05)
+    mold_detail: FloatProperty(
+        name="Mold Detail",
+        description="Polygon density of the generated mold body and clamp wings. "
+                    "Their surfaces are rebuilt on a voxel grid sized from the wall "
+                    "thickness; this divides that voxel, so 2 is twice as fine (no "
+                    "jagged edges, about 4x the polygons and slower), 1 is the "
+                    "original coarse setting. Doesn't touch the positive, which "
+                    "always keeps your model's full detail",
+        default=2.0, min=1.0, max=8.0, soft_max=4.0, precision=1,
+    )
 
     # --- Materials (for the weight estimate) ---------------------------- #
     silicone_preset: EnumProperty(

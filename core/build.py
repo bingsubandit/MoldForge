@@ -2451,7 +2451,9 @@ def _wing_rind(master, outer_offset, width, props, coll, funnels=None, under=Non
     heavy mesh twice here OOM-killed the build. The dilation repair is also clamped
     to the flange resolution so it can't re-inflate the coarse copy."""
     base = util.duplicate_object(master, "MF_wbase", coll)
-    flange_voxel = max(outer_offset * 0.6, width * 0.25, 1.2)   # finer -> cleaner edges
+    # finer -> cleaner edges; Mold Detail divides it like the body's voxel
+    flange_voxel = max(outer_offset * 0.6, width * 0.25, 1.2) / max(
+        getattr(props, "mold_detail", 1.0), 1.0)
     if len(base.data.polygons) > C.FLANGE_COARSEN_FACES:
         meshprep.voxel_remesh(base, flange_voxel)
     cprops = types.SimpleNamespace(**vars(props))

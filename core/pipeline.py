@@ -1333,6 +1333,7 @@ def _derive_sizes(work, props):
     mn, mx = util.world_bbox(work)
     dims = mx - mn
     char = max((dims.x + dims.y + dims.z) / 3.0, 1e-4)
+    mold_detail = min(max(getattr(props, "mold_detail", 1.0), 1.0), 8.0)
 
     wall = props.wall_thickness
     shell = props.shell_wall
@@ -1449,10 +1450,12 @@ def _derive_sizes(work, props):
         # impression, so it must keep the model's detail: key the voxel to the
         # model size (~200 voxels across it), not the wall. Voxel remesh rebuilds
         # from surface area, so this stays light and manifold while sharp.
+        # Mold Detail divides it: finer mold surfaces, no jagged edges.
         detail_voxel=(min(max(char / C.DIRECT_VOXEL_DIV, C.DIRECT_VOXEL_MIN),
                           C.DIRECT_VOXEL_MAX)
                       if not is_jacket
-                      else max(C.JACKET_VOXEL_FACTOR * offset, 0.2)),
+                      else max(C.JACKET_VOXEL_FACTOR * offset, 0.2)) / mold_detail,
+        mold_detail=mold_detail,
     )
 
 
