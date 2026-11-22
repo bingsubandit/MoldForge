@@ -4,6 +4,14 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+- **Fixed: exported STLs with non-manifold edges and inverted, doubled
+  triangles** on parts Blender reported as watertight. An STL joins triangles
+  wherever their corners share a position, so two vertices at one spot (some
+  only after the part is moved onto the model), or two faces that both
+  triangulated the same sliver (one copy facing each way), came out as pinched
+  edges and back-facing duplicates. Every part, and the positive, is now made
+  exactly what its STL will hold - welded, triangulated, fins removed - when
+  it is built and again on export, kept only where it leaves the file cleaner.
 - **New: counterbored screw heads.** Screw Master to Plate could only
   countersink the plate for a flat-head screw. A new Head Type choice adds a
   flat-bottomed counterbore for pan, button, cheese or socket cap heads, with

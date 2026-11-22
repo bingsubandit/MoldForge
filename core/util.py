@@ -392,6 +392,139 @@ def keep_largest_island(obj):
         bm.free()
 
 
+def stl_positions(obj, me=None):
+    """The float32 world-space position of each vertex of ``me`` (default
+    ``obj.data``), exactly as the STL export writes it. Shared by the exporter
+    and ``stl_defects`` so the check sees the very numbers in the file."""
+    import numpy as np
+    me = obj.data if me is None else me
+    co = np.empty(len(me.vertices) * 3, dtype=np.float32)
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3).astype(np.float64)
+    mw = np.array(obj.matrix_world, dtype=np.float64)
+    return (co @ mw[:3, :3].T + mw[:3, 3]).astype(np.float32)
+
+
+def _stl_vertex_ids(obj):
+    """Each vertex's id as an STL reader sees it: vertices written at the same
+    position share one."""
+    import numpy as np
+    _u, vid = np.unique(stl_positions(obj), axis=0, return_inverse=True)
+    return vid.reshape(-1)
+
+
+def stl_defects(obj):
+    """What an STL reader sees wrong with ``obj``: it gets bare triangles and
+    joins them wherever their corners have the same (float32) position. Returns
+    ``(bad_edges, duplicate_tris)`` - edges not shared by exactly two triangles,
+    and triangles that repeat another's corners. Both are 0 for a clean solid.
+
+    ``part_is_valid`` can pass a mesh this fails: two distinct vertices that
+    are written at one position (even only after the part is moved into place),
+    or two faces whose triangulations both cut off the same near-zero-area
+    sliver (one facing each way), look fine to Blender but come out of the
+    export as a pinched edge or a doubled, inverted triangle."""
+    import numpy as np
+    me = obj.data
+    if not me.polygons:
+        return 0, 0
+    me.calc_loop_triangles()
+    vid = _stl_vertex_ids(obj)
+    tri = np.empty(len(me.loop_triangles) * 3, dtype=np.int64)
+    me.loop_triangles.foreach_get("vertices", tri)
+    tri = vid[tri.reshape(-1, 3)]
+    edges = np.sort(np.concatenate([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]]),
+                    axis=1)
+    _e, ecount = np.unique(edges, axis=0, return_counts=True)
+    _t, tcount = np.unique(np.sort(tri, axis=1), axis=0, return_counts=True)
+    return int((ecount != 2).sum()), int((tcount - 1).sum())
+
+
+def _finish_mesh(obj, vid, dissolve):
+    """One attempt for ``finish_for_export`` on ``obj.data`` (in place)."""
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        bm.verts.ensure_lookup_table()
+        # Exactly the corners the STL reader joins - a distance weld would also
+        # pull genuinely separate, close vertices together.
+        first, targetmap = {}, {}
+        for v in bm.verts:
+            keep = first.setdefault(int(vid[v.index]), v)
+            if keep is not v:
+                targetmap[v] = keep
+        if targetmap:
+            bmesh.ops.weld_verts(bm, targetmap=targetmap)
+        if dissolve > 0.0:
+            # zero-area faces between corners a hair apart: their triangles are
+            # slivers that a neighbour's triangulation overlaps
+            bmesh.ops.dissolve_degenerate(bm, dist=dissolve, edges=bm.edges[:])
+        bmesh.ops.triangulate(bm, faces=[f for f in bm.faces if len(f.verts) > 3],
+                              quad_method='BEAUTY', ngon_method='BEAUTY')
+        same = {}
+        for f in bm.faces:
+            same.setdefault(frozenset(v.index for v in f.verts), []).append(f)
+        fins = []
+        for group in same.values():
+            if len(group) > 1:        # pairs cancel; an odd one out stays
+                fins.extend(group if len(group) % 2 == 0 else group[1:])
+        if fins:
+            bmesh.ops.delete(bm, geom=fins, context='FACES_ONLY')
+        loose = [e for e in bm.edges if not e.link_faces]
+        if loose:
+            bmesh.ops.delete(bm, geom=loose, context='EDGES')
+        lv = [v for v in bm.verts if not v.link_edges]
+        if lv:
+            bmesh.ops.delete(bm, geom=lv, context='VERTS')
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    finally:
+        bm.free()
+
+
+def finish_for_export(obj):
+    """Make the mesh what its STL will be, so the export is as clean as the part:
+    weld vertices the file writes at one position, split the faces into the
+    triangles the file will hold, and delete triangles that come in back-to-back
+    pairs (a zero-thickness fin; one of each pair faces inwards). Where that is
+    not enough, zero-area faces between corners a hair apart are dissolved
+    first, at growing tolerances (micrometres - a wider dissolve can open the
+    mesh elsewhere). The first attempt that leaves no STL defects wins, else the
+    one that leaves fewest; a part that was valid must stay valid, and if
+    nothing helps the mesh is restored. Returns the STL defects left.
+
+    Uses the object's current placement: call it once the part is where it
+    will be exported from."""
+    before = stl_defects(obj)
+    if before == (0, 0):
+        return before
+    was_valid = part_is_valid(obj)[0]
+    vid = _stl_vertex_ids(obj)
+    reach = max(float(abs(stl_positions(obj)).max()), 1.0)
+    orig = obj.data
+    best, best_mesh = before, None
+    for dissolve in (0.0, reach * 1e-7, reach * 1e-6, reach * 1e-5):
+        trial = orig.copy()
+        obj.data = trial
+        _finish_mesh(obj, vid, dissolve)
+        got = stl_defects(obj)
+        ok = sum(got) < sum(best) and (not was_valid or part_is_valid(obj)[0])
+        obj.data = orig               # (a mesh still in use can't be removed)
+        if ok:
+            if best_mesh is not None:
+                bpy.data.meshes.remove(best_mesh)
+            best, best_mesh = got, trial
+        else:
+            bpy.data.meshes.remove(trial)
+        if best == (0, 0):
+            break
+    if best_mesh is not None:
+        obj.data = best_mesh
+        if orig.users == 0:
+            bpy.data.meshes.remove(orig)
+    return best
+
+
 def folded_faces(obj):
     """Indices of polygons whose own triangulation folds back on itself: at least
     one of Blender's triangles for the face points against the face's normal.

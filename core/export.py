@@ -5,29 +5,43 @@ import struct
 
 import bpy
 
+from . import util
+
 
 def export_stl(obj, filepath):
-    """Write ``obj`` (with its world transform applied) as a binary STL."""
+    """Write ``obj`` (with its world transform applied) as a binary STL.
+
+    A plain mesh is first made exactly what the file will hold
+    (``util.finish_for_export``, kept only when it leaves it cleaner), so
+    corners that land on one position where the part now sits can't pinch the
+    STL. Positions come from ``util.stl_positions``, the numbers that check
+    reads, so a part that checks clean writes clean."""
+    if obj.type == 'MESH' and not obj.modifiers:
+        util.finish_for_export(obj)
     deps = bpy.context.evaluated_depsgraph_get()
     eval_obj = obj.evaluated_get(deps)
     me = eval_obj.to_mesh()
     try:
         me.calc_loop_triangles()
-        mw = eval_obj.matrix_world   # consistent with the evaluated mesh
-        verts = me.vertices
+        pos = util.stl_positions(eval_obj, me)
         tris = me.loop_triangles
 
         with open(filepath, 'wb') as f:
             f.write(b'\x00' * 80)                       # 80-byte header
             f.write(struct.pack('<I', len(tris)))       # triangle count
             for tri in tris:
-                p = [mw @ verts[i].co for i in tri.vertices]
-                normal = (p[1] - p[0]).cross(p[2] - p[0])
-                if normal.length > 0.0:
-                    normal.normalize()
-                f.write(struct.pack('<3f', normal.x, normal.y, normal.z))
+                p = [[float(c) for c in pos[i]] for i in tri.vertices]
+                e1 = [p[1][k] - p[0][k] for k in range(3)]
+                e2 = [p[2][k] - p[0][k] for k in range(3)]
+                n = [e1[1] * e2[2] - e1[2] * e2[1],
+                     e1[2] * e2[0] - e1[0] * e2[2],
+                     e1[0] * e2[1] - e1[1] * e2[0]]
+                ln = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) ** 0.5
+                if ln > 0.0:
+                    n = [c / ln for c in n]
+                f.write(struct.pack('<3f', *n))
                 for v in p:
-                    f.write(struct.pack('<3f', v.x, v.y, v.z))
+                    f.write(struct.pack('<3f', *v))
                 f.write(struct.pack('<H', 0))           # attribute byte count
     finally:
         eval_obj.to_mesh_clear()

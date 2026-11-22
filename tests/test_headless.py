@@ -429,6 +429,25 @@ def mfutil_export(parts, out_dir):
     return mf_export.export_objects(parts, out_dir)
 
 
+def _stl_soup_ok(path):
+    """Read a binary STL as a slicer does - triangles joined where corners share
+    a position - and check every edge is shared by exactly two triangles, with
+    no triangle repeated."""
+    from collections import Counter
+    with open(path, "rb") as f:
+        data = f.read()
+    n = struct.unpack_from("<I", data, 80)[0]
+    edges, tris = Counter(), Counter()
+    for i in range(n):
+        vals = struct.unpack_from("<12f", data, 84 + i * 50)
+        p = [vals[3:6], vals[6:9], vals[9:12]]
+        tris[tuple(sorted(p))] += 1
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            edges[tuple(sorted((p[a], p[b])))] += 1
+    return (all(c == 2 for c in edges.values())
+            and all(c == 1 for c in tris.values()))
+
+
 def main():
     print(f"Blender {bpy.app.version_string}")
     moldforge.register()
@@ -706,6 +725,37 @@ def main():
           f"Mold Detail 2 builds a much finer mold ({md[1.0][1]} -> {md[2.0][1]} faces)")
     check(abs(md[2.0][2] - md[1.0][2]) < md[1.0][2] * 0.1,
           f"...of the same shape (volume {md[1.0][2]:.0f} vs {md[2.0][2]:.0f} u³)")
+
+    # --- The STL a part exports must be as clean as Blender says the part is. An
+    # STL reader joins triangles by corner position, so two vertices at one spot,
+    # or two faces that both cut off the same sliver (one triangle facing each
+    # way), export as pinched edges and doubled, inverted triangles though
+    # part_is_valid passes. These builds all produced such parts.
+    print("\n=== Exported STL is watertight (as a slicer reads it) ===")
+    stl_cfgs = [
+        ("Locking Base", make_master, dict(box_style='POUR_BOX', base_style='LOCK', wings=True)),
+        ("Locking Base, axisymmetric", make_axisym_master,
+         dict(box_style='POUR_BOX', base_style='LOCK', wings=True)),
+        ("key plate + channel", make_axisym_master,
+         dict(box_style='POUR_BOX', base_style='OPEN', base_plate=True, wings=True,
+              pour_channel=True)),
+        ("united plate + channel + cone keys", make_axisym_master,
+         dict(box_style='POUR_BOX', base_style='OPEN', base_plate=True, plate_unite=True,
+              wings=True, pour_channel=True, wing_keys='CONE')),
+    ]
+    for label_, maker_, cfg_ in stl_cfgs:
+        reset_scene()
+        r_ = pipeline.build_mold_system(maker_("Model"), _over(default_props(), **cfg_))
+        outs = [*r_["parts"], r_["positive"]]
+        defects = {o.name: mfutil.stl_defects(o) for o in outs}
+        bad_ = {k: v for k, v in defects.items() if sum(v)}
+        check(not bad_ and all(mfutil.part_is_valid(q)[0] for q in r_["parts"]),
+              f"{label_}: every exported STL is closed, no doubled triangles "
+              f"({bad_ or 'clean'})")
+        tmp_ = os.path.join(bpy.app.tempdir or "/tmp", "mf_stl_check")
+        written = mfutil_export(r_["parts"], tmp_)
+        soup_ok = all(_stl_soup_ok(w) for w in written)
+        check(soup_ok, f"{label_}: the written STL files themselves read back closed")
 
     # --- Sprue is a raised pour funnel (stands proud of the mold) + stays valid
     print("\n=== Pour funnel ===")

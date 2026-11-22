@@ -780,6 +780,10 @@ def _build_once(master, props, trim_ok=False):
         # facets in the STL). Weld them shut before the parts are checked.
         for part in parts:
             util.fix_folded_faces(part)
+            # What Blender calls watertight can still export with pinched or
+            # doubled triangles (coincident vertices, slivers cut off twice):
+            # make the mesh what the STL will hold.
+            util.finish_for_export(part)
 
         trimmed = False
         split_notes = []
@@ -942,6 +946,11 @@ def _build_once(master, props, trim_ok=False):
         # Move the result onto the master's location so it lines up with the model.
         for o in (*pos_parts, *parts):
             o.location = home
+        # Now that each sits where it exports from: the same STL clean-up (the
+        # move rounds some corners onto one position); only where it helps.
+        bpy.context.view_layer.update()
+        for o in (*pos_parts, *parts):
+            util.finish_for_export(o)
         if dual_core is not None:
             dual_core.location = home
         # The printable positive stays VISIBLE - it replaces the model on
