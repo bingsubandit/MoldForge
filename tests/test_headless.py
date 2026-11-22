@@ -275,6 +275,38 @@ def make_nonmanifold_master():
     return o
 
 
+def make_bell_master(name="Model", r0=30.0, r1=22.0, h=90.0, wobble=1.5,
+                     seg=48, rows=30):
+    """A mushroom-like solid: a tapered stem flaring into a wide domed cap, its
+    sides wobbled so no two rings line up (the user's fairy-house mushroom)."""
+    bm = bmesh.new()
+    rings = []
+    for j in range(rows + 1):
+        t = j / rows
+        r = r0 + (r1 - r0) * t
+        if t > 0.55:
+            r = r1 * 1.6 * math.sqrt(max(1.0 - ((t - 0.55) / 0.45) ** 2, 0.03))
+        ring = []
+        for i in range(seg):
+            a = 2.0 * math.pi * i / seg
+            rr = r + wobble * math.sin(7 * a + 3 * t)
+            ring.append(bm.verts.new((rr * math.cos(a), rr * math.sin(a), h * t)))
+        rings.append(ring)
+    for j in range(rows):
+        for i in range(seg):
+            k = (i + 1) % seg
+            bm.faces.new((rings[j][i], rings[j][k], rings[j + 1][k], rings[j + 1][i]))
+    bm.faces.new(list(reversed(rings[0])))
+    bm.faces.new(rings[rows])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    o = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(o)
+    return o
+
+
 def make_multi_island_master():
     bm = bmesh.new()
     bmesh.ops.create_icosphere(bm, subdivisions=3, radius=6, matrix=Matrix.Translation((-9, 0, 0)))
@@ -742,6 +774,17 @@ def main():
         ("united plate + channel + cone keys", make_axisym_master,
          dict(box_style='POUR_BOX', base_style='OPEN', base_plate=True, plate_unite=True,
               wings=True, pour_channel=True, wing_keys='CONE')),
+    ]
+    # The user's case: a mushroom on an open bottom with the bottom-fill channel -
+    # Mold_A had a hole where the channel's pipe meets the mold at its base.
+    stl_cfgs += [
+        ("mushroom, open bottom + channel", make_bell_master,
+         dict(box_style='POUR_BOX', base_style='OPEN', wings=True, pour_channel=True,
+              wing_keys='CONE')),
+        ("small mushroom, open bottom + channel", lambda n: make_bell_master(
+            n, r0=15.0, r1=11.0, h=45.0, wobble=0.8),
+         dict(box_style='POUR_BOX', base_style='OPEN', wings=True, pour_channel=True,
+              wing_keys='CONE')),
     ]
     for label_, maker_, cfg_ in stl_cfgs:
         reset_scene()

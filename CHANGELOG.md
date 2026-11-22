@@ -16,6 +16,8 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
   edges and back-facing duplicates. Every part, and the positive, is now made
   exactly what its STL will hold - welded, triangulated, fins removed - when
   it is built and again on export, kept only where it leaves the file cleaner.
+  This also closes the hole where the bottom-fill channel's pipe meets the
+  mold at its base on an open bottom (user's mushroom).
 - **New: counterbored screw heads.** Screw Master to Plate could only
   countersink the plate for a flat-head screw. A new Head Type choice adds a
   flat-bottomed counterbore for pan, button, cheese or socket cap heads, with
