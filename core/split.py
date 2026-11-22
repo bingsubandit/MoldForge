@@ -16,7 +16,7 @@ from . import util
 
 
 def split_parts(mold, master, axis, props, coll, wall, radial_center=None,
-                wing_bolt_zs=None, parting=None):
+                wing_bolt_zs=None, parting=None, wing_offset=0.0, wing_skip=()):
     """Split the mold body into the requested number of printable pieces.
 
     Two pieces use the contoured/planar parting (with keys/teeth/wings). Three or
@@ -28,13 +28,16 @@ def split_parts(mold, master, axis, props, coll, wall, radial_center=None,
     given, the wedge cuts use it so every seam falls exactly on its wing (the wings
     shift the mold's bounding box, so re-deriving the centre would miss them).
     ``wing_bolt_zs`` is the bolt heights the 2-part wings drilled (None = no wings) —
-    the wing alignment keys are placed between them."""
+    the wing alignment keys are placed between them. ``wing_offset`` (the mold
+    wall's offset from the model) and ``wing_skip`` (seams to leave alone) steer
+    the radial wing keys."""
     n = max(int(getattr(props, "parts_count", 2)), 2)
     if n <= 2:
         half_a, half_b = split(mold, master, axis, props, coll, wall,
                                wing_bolt_zs=wing_bolt_zs, parting=parting)
         return [half_a, half_b]
-    return _split_radial(mold, master, props, coll, wall, n, center=radial_center)
+    return _split_radial(mold, master, props, coll, wall, n, center=radial_center,
+                         wing_offset=wing_offset, wing_skip=wing_skip)
 
 
 def resolve_axis(props, obj):
@@ -120,9 +123,9 @@ def split(mold, master, axis, props, coll, wall, wing_bolt_zs=None, parting=None
     # built (off, or rolled back), so nothing to key onto.
     if (getattr(props, "wings", False) and wing_bolt_zs is not None
             and getattr(props, "wing_keys", 'NONE') != 'NONE'):
-        _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off,
-                       wing_bolt_zs,
-                       parting=parting if contoured_used else None)
+        _record_wing_keys(props, _add_wing_keys(
+            half_a, half_b, props, axis, ai, mn, mx, coll, off, wing_bolt_zs,
+            parting=parting if contoured_used else None))
 
     return half_a, half_b
 
@@ -488,33 +491,23 @@ def _add_keys(half_a, half_b, props, axis, ai, mn, mx, wall, coll, off=0.0):
         placed += 1
 
 
-def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
-                   parting=None):
-    """Wing Alignment keys: a raised key on half_a's clamp-wing mating face seats into
-    a matching socket in half_b, so the bolted halves can't shear sideways. Three
-    shapes (the Wing Alignment option): CONE — a pointed pin, self-centering; DOME — a
-    half sphere, smooth engage/release; FRUSTUM — a half (truncated) cone pad, sturdy.
+def _wing_key_dims(props):
+    """Shared Wing Alignment sizing for the 2-part and radial wings, or None when
+    keys are off or the wing lip is too thin for a useful key.
 
-    Each half keeps half the wing's thickness at the seam, so a key never protrudes
-    deeper than that lip minus the fit clearance minus a socket floor — a socket can
-    never punch through the mating wing. The key DIAMETER is the user's Key Size (a
-    bigger size grows the footprint; the dome becomes a wide spherical cap when the
-    lip is shallow). Keys are spread along the seam at the Key Spacing pitch, dodging
-    the drilled bolt holes (``bolt_zs``); the socket is the same shape grown by the
-    Fit Clearance so printed parts actually seat. Best-effort with rollback: a key
-    that would leave either half invalid is skipped, never breaking a good mold."""
+    Each piece keeps half the wing's thickness at the seam, so with automatic
+    height a key never protrudes deeper than that lip minus the fit clearance minus
+    a socket floor - a socket can never punch through the mating wing."""
     style = getattr(props, "wing_keys", 'NONE')
-    h = next(i for i in range(3) if i != ai and i != 2)
-    center = (mn + mx) * 0.5
-    seam = center[ai] + off
+    if style == 'NONE':
+        return None
     width = max(getattr(props, "wing_width", 8.0), 2.0)
     thickness = max(getattr(props, "wing_thickness", 4.0), 2.0)
     clear = max(getattr(props, "fit_clearance", 0.2), 0.0)
     prot_cap = thickness * 0.5 - clear - 0.5  # leave a floor under the socket
     if prot_cap < 0.4:
-        return                                # wing lip too thin for a useful key
+        return None                           # wing lip too thin for a useful key
     R = max(min(getattr(props, "wing_key_size", 6.0) * 0.5, width * 0.45), 0.5)
-    spacing = max(getattr(props, "wing_key_spacing", 40.0), 4.0)
     height = max(getattr(props, "wing_key_height", 0.0), 0.0)
     if height > 0.0:
         # Explicit Key Height: the user chose how far the keys stand out — past the
@@ -527,15 +520,20 @@ def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
         # never pierces the wing.
         want = {'CONE': R * 1.2, 'DOME': R, 'FRUSTUM': R * 0.7}.get(style, R)
         prot = min(want, prot_cap)
-    embed = min(thickness * 0.25, 1.0)        # root sunk into A's lip for a solid weld
-    reach = (mx - mn).length + 10.0
+    return types.SimpleNamespace(
+        style=style, width=width, thickness=thickness, clear=clear, R=R, prot=prot,
+        spacing=max(getattr(props, "wing_key_spacing", 40.0), 4.0),
+        embed=min(thickness * 0.25, 1.0),     # root sunk into the lip for a solid weld
+        bias=min(thickness * 0.25, 0.8))      # probe this far inside the keyed lip
 
-    # Key heights: evenly at the Key Spacing pitch, nudged off (or dropped from) any
-    # bolt hole.
+
+def _wing_key_heights(z_lo, z_hi, R, spacing, bolt_zs, props):
+    """Key heights between ``z_lo`` and ``z_hi``: evenly at the Key Spacing pitch,
+    nudged off (or dropped from) any bolt hole in ``bolt_zs``."""
     zpad = max(R + 1.0, 2.0)
-    z0, z1 = mn.z + zpad, mx.z - zpad
+    z0, z1 = z_lo + zpad, z_hi - zpad
     if z1 <= z0:
-        return
+        return []
     span = z1 - z0
     n = max(1, int(round(span / spacing)))
     guard = max(getattr(props, "bolt_radius", 1.5), 0.5) + R + 1.0
@@ -552,76 +550,171 @@ def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
                 continue                       # no safe spot near this bolt: skip it
         if all(abs(z - pz) >= 2.0 * R + 1.0 for pz in picks):
             picks.append(z)
+    return picks
 
-    def shape(name, hc, z, grow, deeper, seam=seam):
-        c = center.copy(); c[h] = hc; c[2] = z
-        r_face = R + grow
-        depth_out = prot + deeper
-        if style == 'DOME':
-            # Spherical cap: footprint r_face on the seam, poking depth_out past it —
-            # a full hemisphere when the lip allows, a wider shallow cap when not. The
-            # sphere's buried bulk is clipped flush inside A's lip so the male can never
-            # bulge out of the wing's back face (and the socket cuts only its cap depth).
-            rs = (r_face * r_face + depth_out * depth_out) / (2.0 * depth_out)
-            c[ai] = seam + (rs - depth_out)
-            ball = util.add_sphere(name, c, rs, coll, subdiv=3)
-            sb = center.copy(); sb[ai] = seam + (embed - depth_out - 1.0) * 0.5
-            size = Vector((0.0, 0.0, 0.0))
-            size[ai] = depth_out + 1.0 + embed
-            size[h] = size[2] = 4.0 * rs + 4.0
-            sb[2] = z; sb[h] = hc
-            box = util.add_box(name + "_clip", sb, size, coll)
-            util.boolean(ball, box, 'INTERSECT')
-            util.remove_object(box)
-            return ball
-        r_tip = r_face * (0.06 if style == 'CONE' else 0.55)
-        # half_a keeps the +axis side, so the key protrudes toward -axis: tip at r1.
-        c[ai] = seam + (embed - depth_out) * 0.5
-        return util.add_cone(name, c, r_tip, r_face, depth_out + embed, axis, coll)
+
+def _wing_key_solid(name, dims, center, ai, h, axis, hc, z, seam, grow, deeper, coll):
+    """One key (``grow`` = ``deeper`` = 0) or its socket (both = the clearance), in
+    world space. The keyed piece keeps the +``axis`` side of the seam, so the key
+    protrudes toward -``axis``; ``hc`` is its position along axis ``h``."""
+    R, style, embed = dims.R, dims.style, dims.embed
+    c = center.copy(); c[h] = hc; c[2] = z
+    r_face = R + grow
+    depth_out = dims.prot + deeper
+    if style == 'DOME':
+        # Spherical cap: footprint r_face on the seam, poking depth_out past it —
+        # a full hemisphere when the lip allows, a wider shallow cap when not. The
+        # sphere's buried bulk is clipped flush inside the lip so the male can never
+        # bulge out of the wing's back face (and the socket cuts only its cap depth).
+        rs = (r_face * r_face + depth_out * depth_out) / (2.0 * depth_out)
+        c[ai] = seam + (rs - depth_out)
+        ball = util.add_sphere(name, c, rs, coll, subdiv=3)
+        sb = center.copy(); sb[ai] = seam + (embed - depth_out - 1.0) * 0.5
+        size = Vector((0.0, 0.0, 0.0))
+        size[ai] = depth_out + 1.0 + embed
+        size[h] = size[2] = 4.0 * rs + 4.0
+        sb[2] = z; sb[h] = hc
+        box = util.add_box(name + "_clip", sb, size, coll)
+        util.boolean(ball, box, 'INTERSECT')
+        util.remove_object(box)
+        return ball
+    r_tip = r_face * (0.06 if style == 'CONE' else 0.55)
+    # tip at r1, the -axis end
+    c[ai] = seam + (embed - depth_out) * 0.5
+    return util.add_cone(name, c, r_tip, r_face, depth_out + embed, axis, coll)
+
+
+def _seat_wing_key(keyed, mating, male, socket, coll):
+    """Union ``male`` into ``keyed`` and cut ``socket`` from ``mating``, if the key
+    really sits on ``keyed``'s lip and both pieces stay valid; otherwise roll both
+    back. Removes ``male`` and ``socket`` either way. Returns True when placed."""
+    try:
+        probe = util.duplicate_object(male, "MF_wktest", coll)
+        util.boolean(probe, keyed, 'INTERSECT')
+        seated = bool(probe.data.polygons)
+        util.remove_object(probe)
+        if not seated:
+            return False
+        a_bak, b_bak = keyed.data.copy(), mating.data.copy()
+        try:
+            util.boolean(keyed, male, 'UNION')
+            util.boolean(mating, socket, 'DIFFERENCE')
+            if not (util.part_is_valid(keyed)[0] and util.part_is_valid(mating)[0]):
+                raise RuntimeError("wing key would break a piece")
+        except Exception:                     # roll back; a key never breaks a piece
+            for obj, bak in ((keyed, a_bak), (mating, b_bak)):
+                cur = obj.data
+                obj.data = bak
+                if cur.users == 0:
+                    bpy.data.meshes.remove(cur)
+            return False
+        for bak in (a_bak, b_bak):
+            if bak.users == 0:
+                bpy.data.meshes.remove(bak)
+        return True
+    finally:
+        util.remove_object(male)
+        util.remove_object(socket)
+
+
+def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
+                   parting=None):
+    """Wing Alignment keys: a raised key on half_a's clamp-wing mating face seats into
+    a matching socket in half_b, so the bolted halves can't shear sideways. Three
+    shapes (the Wing Alignment option): CONE — a pointed pin, self-centering; DOME — a
+    half sphere, smooth engage/release; FRUSTUM — a half (truncated) cone pad, sturdy.
+
+    The key DIAMETER is the user's Key Size (a bigger size grows the footprint; the
+    dome becomes a wide spherical cap when the lip is shallow); its height comes from
+    ``_wing_key_dims``. Keys are spread along the seam at the Key Spacing pitch,
+    dodging the drilled bolt holes (``bolt_zs``); the socket is the same shape grown
+    by the Fit Clearance so printed parts actually seat. Best-effort with rollback: a
+    key that would leave either half invalid is skipped, never breaking a good mold."""
+    dims = _wing_key_dims(props)
+    if dims is None:
+        return 0
+    h = next(i for i in range(3) if i != ai and i != 2)
+    center = (mn + mx) * 0.5
+    seam = center[ai] + off
+    reach = (mx - mn).length + 10.0
+    picks = _wing_key_heights(mn.z, mx.z, dims.R, dims.spacing, bolt_zs, props)
 
     placed = 0
     for h_sign in (1.0, -1.0):
         for z in picks:
             # probe inside A's wing lip, on the parting surface (contoured or flat)
             found = wing_tip(half_a, parting, center, z, h_sign, reach, seam, ai, h,
-                             bias=min(thickness * 0.25, 0.8))
+                             bias=dims.bias)
             if found is None:
                 continue
             tip, seam_here = found
-            hc = tip - h_sign * max(width * 0.45, R + 1.2)
+            hc = tip - h_sign * max(dims.width * 0.45, dims.R + 1.2)
             if parting is not None:
                 s_key = parting_at(parting, hc, z)
                 seam_here = s_key if s_key is not None else seam_here
 
-            male = shape(f"MF_wkey_{placed}", hc, z, 0.0, 0.0, seam_here)
-            probe = util.duplicate_object(male, "MF_wktest", coll)
-            util.boolean(probe, half_a, 'INTERSECT')
-            seated = bool(probe.data.polygons)
-            util.remove_object(probe)
-            if not seated:
-                util.remove_object(male)
-                continue
-
-            socket = shape(f"MF_wsock_{placed}", hc, z, clear, clear, seam_here)
-            a_bak, b_bak = half_a.data.copy(), half_b.data.copy()
-            try:
-                util.boolean(half_a, male, 'UNION')
-                util.boolean(half_b, socket, 'DIFFERENCE')
-                if not (util.part_is_valid(half_a)[0] and util.part_is_valid(half_b)[0]):
-                    raise RuntimeError("wing key would break a half")
-                for bak in (a_bak, b_bak):
-                    if bak.users == 0:
-                        bpy.data.meshes.remove(bak)
+            male = _wing_key_solid(f"MF_wkey_{placed}", dims, center, ai, h, axis,
+                                   hc, z, seam_here, 0.0, 0.0, coll)
+            socket = _wing_key_solid(f"MF_wsock_{placed}", dims, center, ai, h, axis,
+                                     hc, z, seam_here, dims.clear, dims.clear, coll)
+            if _seat_wing_key(half_a, half_b, male, socket, coll):
                 placed += 1
-            except Exception:                 # roll back; a key never breaks a half
-                for obj, bak in ((half_a, a_bak), (half_b, b_bak)):
-                    cur = obj.data
-                    obj.data = bak
-                    if cur.users == 0:
-                        bpy.data.meshes.remove(cur)
-            finally:
-                util.remove_object(male)
-                util.remove_object(socket)
+    return placed
+
+
+def _add_radial_wing_keys(parts, center, mn, mx, props, coll, n, master, bolt_zs,
+                          offset, skip=()):
+    """Wing Alignment keys for a radial split: up each seam's clamp flange, a key on
+    one wedge's lip seats into a socket in its neighbour's, so bolted wedges can't
+    shear along the seam. Same shapes, sizing, pitch and bolt dodging as the
+    two-part keys (``_add_wing_keys``).
+
+    Seam ``k`` runs out from ``center`` along angle 2 pi k / n, between wedge ``k``
+    (which takes the key) and wedge ``k - 1`` (the socket). A key is placed only
+    where the flange stands clear of the mold wall (the model, ``master``, grown by
+    ``offset``), so a socket never reaches into the cavity; ``skip`` lists seams to
+    leave alone (the bottom-fill channel's). Each key is built in a seam-aligned
+    frame - local X out along the seam, +Y into wedge k - then turned into place.
+    Best-effort with rollback. Returns the number of keys placed."""
+    dims = _wing_key_dims(props)
+    if dims is None:
+        return 0
+    far = (mx - mn).length + 10.0
+    picks = _wing_key_heights(mn.z, mx.z, dims.R, dims.spacing, bolt_zs, props)
+    zero = Vector((0.0, 0.0, 0.0))
+    inset = max(dims.width * 0.45, dims.R + 1.2)
+
+    placed = 0
+    for k in range(n):
+        if k in skip:
+            continue
+        theta = 2.0 * math.pi * k / n
+        d = Vector((math.cos(theta), math.sin(theta), 0.0))
+        nrm = Vector((-math.sin(theta), math.cos(theta), 0.0))   # into wedge k
+        keyed, mating = parts[k], parts[(k - 1) % n]
+        place = (Matrix.Translation(Vector((center.x, center.y, 0.0)))
+                 @ Matrix.Rotation(theta, 4, 'Z'))
+        for z in picks:
+            axis_o = Vector((center.x, center.y, z)) + d * far
+            hit, loc, _n1, _i1 = keyed.ray_cast(axis_o + nrm * dims.bias, -d)
+            hm, lm, _n2, _i2 = master.ray_cast(axis_o, -d)
+            if not (hit and hm):
+                continue
+            tip = (loc - Vector((center.x, center.y, loc.z))).dot(d)
+            tipm = (lm - Vector((center.x, center.y, lm.z))).dot(d)
+            r = tip - inset
+            if (tip - tipm < offset + 0.6 * dims.width
+                    or r - dims.R - dims.clear < tipm + offset):
+                continue                       # no flange standing clear of the wall
+            male = _wing_key_solid(f"MF_rwkey_{placed}", dims, zero, 1, 0, 'Y',
+                                   r, z, 0.0, 0.0, 0.0, coll)
+            socket = _wing_key_solid(f"MF_rwsock_{placed}", dims, zero, 1, 0, 'Y',
+                                     r, z, 0.0, dims.clear, dims.clear, coll)
+            male.data.transform(place)
+            socket.data.transform(place)
+            if _seat_wing_key(keyed, mating, male, socket, coll):
+                placed += 1
+    return placed
 
 
 def cut_horizontal(parts, coll, hz):
@@ -674,7 +767,8 @@ def cut_stack(parts, coll, seam_zs):
 
 # --- Radial multi-part split (3-4 wedges around the vertical axis) ---------- #
 
-def _split_radial(mold, master, props, coll, wall, n, center=None):
+def _split_radial(mold, master, props, coll, wall, n, center=None, wing_offset=0.0,
+                  wing_skip=()):
     """Carve the mold into ``n`` equal wedges around the vertical axis through its
     centre. Each wedge is the mold intersected with a pie-slice prism; intersecting
     two watertight solids keeps each wedge watertight. Adjacent wedges then get a
@@ -709,7 +803,29 @@ def _split_radial(mold, master, props, coll, wall, n, center=None):
     # when wings are off (mirrors the two-part rule).
     if props.key_count > 0 and not getattr(props, "wings", False):
         _add_radial_keys(parts, center, mn, mx, props, wall, coll, n)
+    # Wing Alignment up each seam's flange. ``radial_bolt_zs`` stays None when the
+    # wings were not built (off, or rolled back), so there is nothing to key onto.
+    bolt_zs = getattr(props, "radial_bolt_zs", None)
+    if (getattr(props, "wings", False) and bolt_zs is not None
+            and getattr(props, "wing_keys", 'NONE') != 'NONE'):
+        _record_wing_keys(props, _add_radial_wing_keys(
+            parts, center, mn, mx, props, coll, n, master, bolt_zs, wing_offset,
+            skip=wing_skip))
     return parts
+
+
+def _record_wing_keys(props, placed):
+    """Keep the wing key count for the build result, and tell the user when keys
+    were asked for but none fit."""
+    try:
+        props.wing_keys_placed = placed
+    except AttributeError:
+        pass
+    if not placed:
+        from . import build
+        build.wing_note(props, "no wing alignment keys fit on these clamp wings "
+                               "(the wing lip is too thin or too narrow) - the "
+                               "bolts alone align the pieces")
 
 
 def _pie_prism(center, big, z0, z1, a0, a1, coll):

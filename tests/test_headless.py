@@ -640,6 +640,42 @@ def main():
     check(dA_tight > dA_wide * 1.8,
           f"Key Spacing adds keys at a tighter pitch (+{dA_wide:.1f} -> +{dA_tight:.1f} u³)")
 
+    # Radial molds key every seam's flange too. Wedge A spans the angles from
+    # seam 0 round to seam 1, so without keys nothing of it lies past seam 0;
+    # its keys must poke across that seam into wedge B... the last wedge.
+    print("\n=== Wing alignment keys on radial seams ===")
+    for n_parts in (3, 4):
+        rk_kw = dict(box_style='POUR_BOX', base_style='OPEN', wings=True,
+                     wing_width=10.0, parts_count=n_parts, sprue=False, vent_count=0)
+        reset_scene()
+        rk0 = pipeline.build_mold_system(make_master("Model"),
+                                         _over(default_props(), wing_keys='NONE', **rk_kw))
+        a0 = next(q for q in rk0["parts"] if q.name.startswith("MF_Mold_A"))
+        a0_min_y = mfutil.world_bbox(a0)[0].y
+        f0 = [part_face_count(q) for q in rk0["parts"]]
+        reset_scene()
+        rk = pipeline.build_mold_system(make_master("Model"),
+                                        _over(default_props(), wing_keys='CONE', **rk_kw))
+        wedges = [q for q in rk["parts"] if q.name.startswith("MF_Mold_")]
+        check(len(wedges) == n_parts and all(mfutil.part_is_valid(q)[0] for q in wedges),
+              f"{n_parts} radial wedges with wing keys are all valid")
+        check(rk.get("wing_keys", 0) >= n_parts,
+              f"{n_parts} wedges: at least one key per seam ({rk.get('wing_keys')} placed)")
+        a = next(q for q in rk["parts"] if q.name.startswith("MF_Mold_A"))
+        a_min_y = mfutil.world_bbox(a)[0].y
+        check(a_min_y < a0_min_y - 0.5,
+              f"{n_parts} wedges: wedge A's keys cross seam 0 "
+              f"({a0_min_y - a_min_y:.2f} past it)")
+        check(all(part_face_count(q) > f for q, f in zip(rk["parts"], f0)),
+              f"{n_parts} wedges: every wedge has a key and a socket (more faces)")
+    reset_scene()
+    rk_off = pipeline.build_mold_system(make_master("Model"), _over(
+        default_props(), wing_keys='CONE', box_style='POUR_BOX', base_style='OPEN',
+        wings=False, parts_count=3, sprue=False, vent_count=0))
+    check(rk_off.get("wing_keys", 0) == 0
+          and all(mfutil.part_is_valid(q)[0] for q in rk_off["parts"]),
+          "radial wedges without wings get no wing keys")
+
     # --- Sprue is a raised pour funnel (stands proud of the mold) + stays valid
     print("\n=== Pour funnel ===")
     reset_scene()

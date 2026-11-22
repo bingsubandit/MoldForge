@@ -10,6 +10,13 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
   its own Head Ø and Head Depth; the plate is thickened to keep 1.5 mm under
   the head. The Countersink toggle is now Head Recess and switches either
   type on or off; saved settings from earlier versions load unchanged.
+- **New: wing alignment keys on 3- and 4-piece molds.** Radial molds now key
+  every seam's clamp flange the same way 2-piece molds do (same shapes, size,
+  height and spacing, dodging the bolts); the Alignment setting shows for any
+  piece count. Keys go only where the flange stands clear of the mold wall,
+  and stay off the bottom-fill channel's seam.
+- **Changed: wing alignment keys are on by default** (Cone). Set Alignment to
+  None for the old behaviour. A preset that saved None keeps it.
 
 ## 0.44.2 — the user's model: no stray shells, the label found
 

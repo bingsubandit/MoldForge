@@ -653,14 +653,13 @@ class MOLDFORGE_PT_wings(_MFSub, bpy.types.Panel):
         props = context.scene.moldforge
         layout.active = props.wings
         layout.prop(props, "wing_width", text="Width")
-        if props.parts_count == 2:
-            layout.prop(props, "wing_keys", text="Alignment")
-            if props.wing_keys != 'NONE':
-                col = layout.column(align=True)
-                col.prop(props, "wing_key_size", text="Key size")
-                col.prop(props, "wing_key_height", text="Key height")
-                col.prop(props, "wing_key_spacing", text="Key spacing")
-                layout.prop(props, "fit_clearance", text="Clearance")
+        layout.prop(props, "wing_keys", text="Alignment")
+        if props.wing_keys != 'NONE':
+            col = layout.column(align=True)
+            col.prop(props, "wing_key_size", text="Key size")
+            col.prop(props, "wing_key_height", text="Key height")
+            col.prop(props, "wing_key_spacing", text="Key spacing")
+            layout.prop(props, "fit_clearance", text="Clearance")
         layout.prop(props, "wing_band_notches", text="Band notches")
         layout.prop(props, "bolt_diameter", text="Bolt Ø")
         layout.prop(props, "bolt_auto", text="Auto bolts")

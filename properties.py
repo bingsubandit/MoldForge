@@ -448,15 +448,16 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
         name="Wing Alignment",
         description="Alignment keys on the wing mating faces: a raised key on one "
                     "half seats into a matching socket in the other (grown by Fit "
-                    "Clearance), so the bolted halves can't shear. Placed between "
-                    "the bolt holes and sized to the wing lip",
+                    "Clearance), so the bolted pieces can't shear - on every seam, "
+                    "2-piece or radial. Placed between the bolt holes and sized to "
+                    "the wing lip",
         items=[
             ('NONE', "None", "No alignment keys on the wings (the bolts alone align)"),
             ('CONE', "Cone", "Pointed cone pins - self-centering, easiest to seat"),
             ('DOME', "Half Sphere", "Dome bumps - smooth engage and release"),
             ('FRUSTUM', "Half Cone", "Truncated cone pads - sturdy, shear-resistant"),
         ],
-        default='NONE',
+        default='CONE',
     )
     wing_key_size: _dist("Key Size", 6.0,
                          "Diameter of the wing alignment keys (their footprint on the "

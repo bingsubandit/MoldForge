@@ -716,7 +716,10 @@ def _build_once(master, props, trim_ok=False):
             min(getattr(p, "split_offset", 0.0), _scap), -_scap)
         parts = split.split_parts(mold, shape_ref, axis, p, coll, key_wall,
                                   radial_center=radial_center,
-                                  wing_bolt_zs=wing_bolt_zs, parting=parting)
+                                  wing_bolt_zs=wing_bolt_zs, parting=parting,
+                                  wing_offset=_offset(p),
+                                  # radial wing keys stay off the channel's seam
+                                  wing_skip=(0,) if chan is not None else ())
         if parting is not None and parting.used is False and wing_bolt_zs is not None:
             build.wing_note(p, "the contoured parting did not cut cleanly and fell "
                                "back to a flat cut, so the clamp wings may be split "
@@ -965,6 +968,7 @@ def _build_once(master, props, trim_ok=False):
             "plug_offset": plug_offset,
             "plug_wall": plug_wall,
             "wing_notes": list(getattr(p, "wing_report", [])),
+            "wing_keys": getattr(p, "wing_keys_placed", 0),
             "label_note": label_note,
             "legs": legs_built,
             "legs_note": legs_note,
@@ -1403,6 +1407,7 @@ def _derive_sizes(work, props):
         stand_tilt=getattr(props, "stand_tilt", 0.0),
         wing_band_notches=getattr(props, "wing_band_notches", False),
         radial_bolt_zs=None,
+        wing_keys_placed=0,
         pour_channel=getattr(props, "pour_channel", False),
         channel_radius=getattr(props, "channel_radius", 4.0),
         channel_flip=getattr(props, "channel_flip", False),
