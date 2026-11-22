@@ -180,11 +180,22 @@ def _sheet(name, frame, rows, thick, coll):
     return util.new_mesh_object(name, bm, coll)
 
 
-def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=False):
+def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=False,
+                  hug=False, wing=None):
     """Weld the channel's pipe, fin and mouth onto the still-solid ``mold``
     (before the cavity is carved). ``floor_z`` is the lowest height the gate may
     open into the cavity (the cavity floor, a key plate's rim, a Locking Base's
     model base); ``open_below`` = the pipe runs on down through the open bottom.
+
+    ``hug`` (Follow Model): instead of one straight pipe out at the mold's
+    widest point, the pipe follows the case at every height, just outside it,
+    so a model that narrows under an overhang doesn't get a wing as wide as
+    the overhang all the way down. ``wing`` (a namespace: ``thickness``,
+    ``ext``, ``bolt_r``, ``bolt_zs``, ``axis``) is the clamp wing when there is
+    one: its channel side is then rebuilt at full thickness out to ``ext``
+    beyond the pipe, so it can still be clamped (and keyed) over the pipe, and
+    its bolt holes there are drilled again outboard of the pipe.
+
     Returns the geometry the bore phase needs, or ``(None, reason)``."""
     mn, mx = util.world_bbox(mold)
     far = (mx - mn).length + 20.0
@@ -223,26 +234,51 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
     fh = max(getattr(props, "funnel_height", 12.0), 1.0)
     apex = throat + max(fh * 0.6, 6.0)
     mouth_r = max(bore_r * 1.8, bore_r + 3.0)
-
-    # Pipe along the seam, from under the gate to the throat.
-    steps = max(int((throat - z0) / 4.0), 2)
-    pipe_pts = [frame.point(t_pipe, z0 + (throat - z0) * i / steps) for i in range(steps + 1)]
-    pipe = _sweep("MF_chan", pipe_pts, tube_out, coll)
-    # Fin: from the mold's surface out to the pipe at every height, so the pipe is
-    # never a cantilever where the model narrows.
     fin_t = max(2.0 * wall, 3.0)
-    rows = []
-    for z, r in reach:
-        # 3 mm into the case: between the sampled heights the surface may dip
-        # in, and a fin that only touched it would leave slits (anything that
-        # reaches into the cavity is carved away with it)
-        t_in = (r - 3.0) if r is not None else t_pipe - tube_out
-        t_in = min(t_in, t_pipe - 0.5)
-        rows.append((z, t_in, t_pipe))
-    rows.append((throat, t_pipe - tube_out, t_pipe))
-    fin = _sheet("MF_chanfin", frame, rows, fin_t, coll)
+
+    path = edge_rows = None
+    if hug:
+        path, shell = _hug_path(cavity, frame, z0, throat, far, wall, bore_r)
+        if path is None:
+            return None, "the channel found no cavity wall to follow"
+        t_pipe = _interp(path, gate_z)
+        pipe_pts = [frame.point(t, z) for z, t in path]
+        pipe = _sweep("MF_chan", pipe_pts, tube_out, coll)
+        reach_at = dict(reach)
+        rows, edge_rows = [], []
+        for (z, t), (_z, sh) in zip(path, shell):
+            if wing is not None:
+                t_out = t + tube_out + wing.ext
+                r = _nearest(reach, z)
+                if r is not None:
+                    t_out = max(t_out, r)
+                edge_rows.append((z, t_out))
+            else:
+                t_out = t
+            rows.append((z, min(sh - 3.0, t - 0.5), t_out))
+        fin = _sheet("MF_chanfin", frame, rows,
+                     wing.thickness if wing is not None else fin_t, coll)
+    else:
+        # Pipe along the seam, from under the gate to the throat.
+        steps = max(int((throat - z0) / 4.0), 2)
+        pipe_pts = [frame.point(t_pipe, z0 + (throat - z0) * i / steps)
+                    for i in range(steps + 1)]
+        pipe = _sweep("MF_chan", pipe_pts, tube_out, coll)
+        # Fin: from the mold's surface out to the pipe at every height, so the
+        # pipe is never a cantilever where the model narrows.
+        rows = []
+        for z, r in reach:
+            # 3 mm into the case: between the sampled heights the surface may dip
+            # in, and a fin that only touched it would leave slits (anything that
+            # reaches into the cavity is carved away with it)
+            t_in = (r - 3.0) if r is not None else t_pipe - tube_out
+            t_in = min(t_in, t_pipe - 0.5)
+            rows.append((z, t_in, t_pipe))
+        rows.append((throat, t_pipe - tube_out, t_pipe))
+        fin = _sheet("MF_chanfin", frame, rows, fin_t, coll)
+    t_top = _interp(path, throat) if path else t_pipe
     # Mouth: a cup above the throat to pour into.
-    tp = frame.point(t_pipe, throat)
+    tp = frame.point(t_top, throat)
     cup = util.add_cone("MF_chancup", Vector((tp.x, tp.y, (throat + apex) * 0.5)),
                         tube_out, mouth_r + wall, apex - throat, 'Z', coll, segments=48)
     # Collar: the gate runs from the pipe to the cavity through the fin, which
@@ -258,34 +294,132 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
         if part is not None:
             util.boolean(mold, part, 'UNION')
             util.remove_object(part)
-    return {"frame": frame, "t_pipe": t_pipe, "t_cav": t_cav, "gate_z": gate_z,
-            "z0": z0, "throat": throat, "apex": apex, "bore_r": bore_r,
-            "mouth_r": mouth_r, "open_below": open_below, "floor_z": floor_z,
-            "cup": (tp.x, tp.y, mouth_r + wall), "reach": reach,
-            "tube_out": tube_out}, ""
+    geo = {"frame": frame, "t_pipe": t_pipe, "t_cav": t_cav, "gate_z": gate_z,
+           "z0": z0, "throat": throat, "apex": apex, "bore_r": bore_r,
+           "mouth_r": mouth_r, "open_below": open_below, "floor_z": floor_z,
+           "cup": (tp.x, tp.y, mouth_r + wall), "reach": reach,
+           "tube_out": tube_out, "hug": bool(hug), "path": path,
+           "edge_rows": edge_rows, "bolts_redrilled": 0}
+    if hug and wing is not None and wing.bolt_zs:
+        geo["bolts_redrilled"] = _redrill_bolts(mold, geo, wing, coll)
+    return geo, ""
+
+
+def _interp(rows, z):
+    """Linear read of ``(z, t)`` rows at ``z`` (clamped to their ends)."""
+    if z <= rows[0][0]:
+        return rows[0][1]
+    for (z0, t0), (z1, t1) in zip(rows, rows[1:]):
+        if z0 <= z <= z1:
+            return t0 + (t1 - t0) * ((z - z0) / (z1 - z0) if z1 > z0 else 0.0)
+    return rows[-1][1]
+
+
+def _nearest(rows, z):
+    """The value of the ``(z, t)`` row nearest ``z`` that has one, or None."""
+    best = None
+    for zz, t in rows:
+        if t is not None and (best is None or abs(zz - z) < abs(best[0] - z)):
+            best = (zz, t)
+    return None if best is None else best[1]
+
+
+def _hug_path(cavity, frame, z0, throat, far, wall, bore_r, step=2.0):
+    """The Follow Model pipe's axis: ``(z, t)`` every ``step`` mm from ``z0`` up
+    to the throat, just outside the case - the cavity's reach plus the wall is
+    the case's outside there, and the bore sits a little beyond it. Each height
+    takes the widest case within a bore's radius above and below, so the bore
+    never cuts into a ledge it passes under (a mushroom's cap). Heights with no
+    cavity on the seam (above the top, below the floor) take the nearest that
+    has one. Also returns the case's own outline, ``(z, t)``. ``(None, None)``
+    if the seam never meets the cavity."""
+    n = max(int((throat - z0) / step), 2)
+    zs = [z0 + (throat - z0) * i / n for i in range(n + 1)]
+    raw = [(z, _reach(cavity, frame.point, frame.d, z, far)) for z in zs]
+    if all(t is None for _z, t in raw):
+        return None, None
+    shell = [(z, (t if t is not None else _nearest(raw, z)) + wall) for z, t in raw]
+    win = bore_r + 1.0
+    path = []
+    for z, _t in shell:
+        widest = max(t for zz, t in shell if abs(zz - z) <= win)
+        path.append((z, widest + bore_r + 0.6))
+    return path, shell
+
+
+def _redrill_bolts(mold, geo, wing, coll):
+    """Bolt holes on the channel's side of a Follow Model wing: the pipe and the
+    rebuilt wing filled the ones drilled before, so drill each again outboard
+    of the pipe, at the same height, where there is room. Returns how many."""
+    fr = geo["frame"]
+    made = 0
+    for z in wing.bolt_zs:
+        if abs(z - geo["gate_z"]) < geo["tube_out"] + wing.bolt_r + 0.5:
+            continue
+        edge = wing_edge(geo, z)
+        if edge is None:
+            continue
+        lo, hi = _axis_span(geo, z - wing.bolt_r, z + wing.bolt_r)
+        out = hi + geo["tube_out"]
+        if edge - out < 2.0 * wing.bolt_r + 1.5:
+            continue
+        c = fr.point((out + edge) * 0.5, z)
+        hole = util.add_cone("MF_wbolt", c, wing.bolt_r, wing.bolt_r,
+                             wing.thickness + 2.4, wing.axis, coll)
+        util.boolean(mold, hole, 'DIFFERENCE')
+        util.remove_object(hole)
+        made += 1
+    return made
+
+
+def axis_at(geo, z):
+    """Where the channel's pipe axis is at height ``z``: ``t`` out along its
+    seam from the frame's centre (constant for a straight pipe)."""
+    path = geo.get("path")
+    return _interp(path, z) if path else geo["t_pipe"]
+
+
+def _axis_span(geo, z0, z1):
+    """Nearest and furthest the pipe's axis comes between heights z0 and z1."""
+    path = geo.get("path")
+    if not path:
+        return geo["t_pipe"], geo["t_pipe"]
+    ts = [axis_at(geo, z0), axis_at(geo, z1)] + [t for z, t in path if z0 <= z <= z1]
+    return min(ts), max(ts)
 
 
 def wing_edge(geo, z):
-    """How far out along the channel's seam (``t`` from its frame's centre)
-    the mold reached at height ``z`` before the channel was welded on: the
-    clamp wing's own edge there, which the pipe now hides. The nearer of the
-    two sampled heights round ``z`` (the wing may dip between them); None
-    outside the sampled heights."""
-    rows = [(zz, r) for zz, r in geo.get("reach", ()) if r is not None]
+    """Where the clamp wing on the channel's side ends at height ``z`` (``t``
+    out along the seam from the frame's centre): for a straight pipe, how far
+    the mold reached before the channel was welded on - the wing's own edge,
+    which the pipe now hides; for Follow Model, the edge of the wing rebuilt
+    over the pipe. The nearer of the two sampled heights round ``z`` (the
+    wing may dip between them); None outside the sampled heights."""
+    rows = [(zz, r) for zz, r in (geo.get("edge_rows") or geo.get("reach", ()))
+            if r is not None]
     for (z0, r0), (z1, r1) in zip(rows, rows[1:]):
         if z0 <= z <= z1:
             return min(r0, r1)
     return None
 
 
-def key_room(geo, z, key_r):
+def key_spot(geo, z, key_r, inset):
     """Where a wing key of radius ``key_r`` (its socket's, fit clearance
-    included) may sit on the channel's side at height ``z``: the furthest
-    ``t`` out from the frame's centre that keeps it off the pipe, or None
-    where the gate's tube crosses the wing (just above the floor)."""
+    included) sits on the channel's side at height ``z``: ``t`` out from the
+    frame's centre, ``inset`` in from the wing's edge as on the other side,
+    and off the pipe - inboard of a straight pipe, outboard of a Follow Model
+    one (the wing over it). None where there is no room, or where the gate's
+    tube crosses the wing (just above the floor)."""
     if abs(z - geo["gate_z"]) < geo["tube_out"] + key_r + 0.5:
         return None
-    return geo["t_pipe"] - geo["tube_out"] - key_r - 0.3
+    edge = wing_edge(geo, z)
+    if edge is None:
+        return None
+    t = edge - inset
+    lo, hi = _axis_span(geo, z - key_r, z + key_r)
+    if geo.get("hug"):
+        return t if t - key_r - 0.3 >= hi + geo["tube_out"] else None
+    return min(t, lo - geo["tube_out"] - key_r - 0.3)
 
 
 def bore_channel(mold, geo, coll):
@@ -294,12 +428,17 @@ def bore_channel(mold, geo, coll):
     fr = geo["frame"]
     r = geo["bore_r"]
     gz = geo["gate_z"]
-    tp = geo["t_pipe"]
+    tp = geo["t_pipe"]                     # the pipe's axis at the gate
     bottom = (geo["floor_z"] - 2.0) if geo["open_below"] else gz
-    steps = max(int((geo["throat"] - bottom) / 4.0), 2)
-    pts = [fr.point(tp, bottom + (geo["throat"] - bottom) * i / steps)
-           for i in range(steps + 1)]
-    top_pt = fr.point(tp, geo["throat"])
+    if geo.get("path"):
+        pts = [fr.point(tp, bottom)] + [fr.point(t, z) for z, t in geo["path"]
+                                         if bottom < z < geo["throat"]]
+        pts.append(fr.point(axis_at(geo, geo["throat"]), geo["throat"]))
+    else:
+        steps = max(int((geo["throat"] - bottom) / 4.0), 2)
+        pts = [fr.point(tp, bottom + (geo["throat"] - bottom) * i / steps)
+               for i in range(steps + 1)]
+    top_pt = fr.point(axis_at(geo, geo["throat"]), geo["throat"])
     pts.append(Vector((top_pt.x, top_pt.y, geo["apex"] + 1.0)))
     cutters = [_sweep("MF_chanbore", pts, r, coll)]
     # the gate: from the pipe's axis in along the seam, 2 mm into the cavity

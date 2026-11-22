@@ -4,6 +4,15 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+- **New: Follow Model for the bottom-fill channel.** The channel's pipe stood
+  straight up at the mold's widest point, so on a model that narrows under a
+  wide top (the user's mushroom) the clamp wing on its side was as wide as the
+  cap all the way down. With Follow Model the pipe runs along the case, just
+  outside it at every height (clearing a ledge it passes under), and the wing
+  on that side carries on over the pipe, so it is still clamped; its wing keys
+  sit outboard of the pipe and its bolt holes are drilled again there. On the
+  mushroom the channel side reaches out up to 24 mm less, about 5% less
+  plastic. Off by default.
 - **Clean Up Model** (Mesh Prep, was Heal Mesh) now repairs the model before
   the build: besides welding and fixing normals it drops tiny stray fragments,
   deletes zero-area, duplicate and loose geometry and fills small holes (a big

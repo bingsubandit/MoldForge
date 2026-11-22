@@ -2581,6 +2581,86 @@ def main():
     finally:
         mfchan.bore_channel = real_bore_c
 
+    # Follow Model (user request): the straight channel stands out at the mold's
+    # widest point all the way down, so under a mushroom's cap its wing is as wide
+    # as the cap. Following the model, the pipe runs just outside the case at
+    # every height and the wing carries on over it, so it still clamps.
+    print("\n=== Bottom-fill channel follows the model ===")
+    from moldforge.core import channel as mfchan_h
+    from moldforge.core import build as mfbuild_h
+    real_bore_h = mfchan_h.bore_channel
+    hug_seen = {}
+
+    def _spy_bore_h(mold, geo, coll):
+        hug_seen["geo"] = dict(geo)
+        return real_bore_h(mold, geo, coll)
+
+    def _reach_h(parts, fr, home, z):
+        """How far out along the channel's seam the parts reach at height z (a
+        ray in from far out, just either side of the seam)."""
+        best = None
+        for o in parts:
+            mi = o.matrix_world.inverted()
+            for sgn_ in (0.6, -0.6):
+                org = fr.point(500.0, z) + fr.n * sgn_ + home
+                hit, loc, _n, _i = o.ray_cast(mi @ org, (mi.to_3x3() @ -fr.d).normalized())
+                if hit:
+                    t_ = ((o.matrix_world @ loc) - home - fr.center).dot(fr.d)
+                    best = t_ if best is None else max(best, t_)
+        return best
+
+    hug_res = {}
+    mfchan_h.bore_channel = _spy_bore_h
+    try:
+        for hug in (False, True):
+            reset_scene()
+            rh_ = pipeline.build_mold_system(make_bell_master("Bell"), _over(
+                default_props(), box_style='POUR_BOX', base_style='OPEN', wings=True,
+                parts_count=2, sprue=False, vent_count=0, pour_channel=True,
+                wing_keys='CONE', bolt_auto=True, channel_hug=hug))
+            bpy.context.view_layer.update()
+            geo_h = hug_seen["geo"]
+            fr_h = geo_h["frame"]
+            home_h = rh_["positive"].location
+            halves_h = [q for q in rh_["parts"] if q.name.startswith("MF_Mold_")]
+            hug_res[hug] = dict(
+                ok=bool(rh_.get("channel"))
+                and all(mfutil.part_is_valid(q)[0] for q in rh_["parts"]),
+                waist=_reach_h(halves_h, fr_h, home_h, -15.0), geo=geo_h,
+                halves=halves_h, home=home_h, keys=rh_.get("wing_keys", 0))
+    finally:
+        mfchan_h.bore_channel = real_bore_h
+    st_, hg_ = hug_res[False], hug_res[True]
+    check(st_["ok"] and hg_["ok"], "straight and Follow Model channels: valid parts")
+    check(hg_["waist"] is not None and st_["waist"] is not None
+          and hg_["waist"] < st_["waist"] - 5.0,
+          f"Follow Model: the mold reaches out less at the waist under the cap "
+          f"({st_['waist']:.1f} -> {hg_['waist']:.1f} mm along the channel's seam)"
+          if hg_["waist"] is not None and st_["waist"] is not None
+          else "Follow Model: the mold reaches out less at the waist (not measured)")
+    gh_ = hg_["geo"]
+    frh_ = gh_["frame"]
+    dgh = bpy.context.evaluated_depsgraph_get()
+    zs_h = [gh_["gate_z"] + (gh_["throat"] - gh_["gate_z"]) * i / 30 for i in range(31)]
+    blocked_h = [round(z, 1) for z in zs_h
+                 if any(mfbuild_h._inside_solid(o, frh_.point(mfchan_h.axis_at(gh_, z), z)
+                                                + hg_["home"], dgh) for o in hg_["halves"])]
+    ts_h = [mfchan_h.axis_at(gh_, z) for z in zs_h]
+    check(not blocked_h and max(ts_h) - min(ts_h) > 5.0,
+          f"... its pipe bends with the model ({min(ts_h):.1f} to {max(ts_h):.1f} mm out) "
+          f"and is open from the mouth down to the gate (blocked at {blocked_h[:3]})")
+    over_ = []
+    for z in zs_h[4:-4:3]:
+        pt = frh_.point(mfchan_h.axis_at(gh_, z) + gh_["tube_out"] + 2.0, z)
+        over_.append(any(mfbuild_h._inside_solid(o, pt + frh_.n * sgn_ + hg_["home"], dgh)
+                         for o in hg_["halves"] for sgn_ in (0.6, -0.6)))
+    check(all(over_),
+          f"... and the clamp wing carries on over the pipe at every height, so it "
+          f"can still be clamped ({sum(over_)}/{len(over_)})")
+    check(gh_.get("bolts_redrilled", 0) >= 1 and hg_["keys"] >= 1,
+          f"... with its bolt holes drilled again outboard of the pipe "
+          f"({gh_.get('bolts_redrilled', 0)}) and wing keys ({hg_['keys']})")
+
     # Wing alignment keys and the channel (user report): the channel's pipe runs up
     # one side of the clamp wing, and the keys were placed on it anyway - cones
     # standing on the pipe. A key must never overlap the pipe; the other side of

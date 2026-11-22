@@ -618,7 +618,8 @@ def _build_once(master, props, trim_ok=False):
                                            flip=getattr(p, "channel_flip", False))
                 chan, chan_note = channel.build_channel(
                     mold, cavity_cutter, shape_ref, p, frame, floor_z, coll,
-                    open_below=open_below)
+                    open_below=open_below, hug=getattr(p, "channel_hug", False),
+                    wing=_channel_wing(p, axis, multipart, wing_bolt_zs))
             except Exception as exc:                  # never fails the mold
                 chan, chan_note = None, f"the bottom-fill channel failed ({exc})"
                 for o in list(coll.objects):
@@ -1366,6 +1367,27 @@ def _build_tray(master, props):
         raise
 
 
+def _channel_wing(p, axis, multipart, wing_bolt_zs):
+    """The clamp wing as a Follow Model channel rebuilds it over its pipe, or
+    None when no wing was built: its thickness, how far it reaches past the
+    pipe (half the wing width, and enough for a wing key or a bolt hole
+    outboard of it), the bolt heights to drill again and their axis."""
+    if not p.wings:
+        return None
+    bolt_zs = getattr(p, "radial_bolt_zs", None) if multipart else wing_bolt_zs
+    if bolt_zs is None:
+        return None                         # the wings were rolled back
+    dims = split._wing_key_dims(p)
+    key_need = (max(dims.width * 0.45, dims.R + 1.2) + dims.R + dims.clear + 1.0
+                if dims is not None else 0.0)
+    bolt_need = 2.0 * p.bolt_radius + 3.0 if bolt_zs else 0.0
+    return types.SimpleNamespace(
+        thickness=p.wing_thickness,
+        ext=max(p.wing_width * 0.5, key_need, bolt_need, 5.0),
+        bolt_r=p.bolt_radius, bolt_zs=list(bolt_zs),
+        axis='Y' if multipart else axis)
+
+
 def _offset(props):
     """The dilation distance that can shard (gap, plus shell for a jacket)."""
     extra = props.shell_wall if props.box_style == 'POUR_BOX' else 0.0
@@ -1539,6 +1561,7 @@ def _derive_sizes(work, props):
         pour_channel=getattr(props, "pour_channel", False),
         channel_radius=getattr(props, "channel_radius", 4.0),
         channel_flip=getattr(props, "channel_flip", False),
+        channel_hug=getattr(props, "channel_hug", False),
         vent_place=getattr(props, "vent_place", 'AUTO'),
         funnel_height=getattr(props, "funnel_height", 12.0),
         sprue_flare=getattr(props, "sprue_flare", 2.4),

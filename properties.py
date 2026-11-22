@@ -772,6 +772,18 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
     channel_radius: _dist("Channel Radius", 4.0,
                           "Radius of the bottom-fill channel's bore - its own size, not "
                           "tied to the silicone thickness", mn=1.0, soft=12.0)
+    channel_hug: BoolProperty(
+        name="Follow Model",
+        description="Run the bottom-fill channel's pipe along the case, just outside "
+                    "it at every height, instead of straight down at the mold's "
+                    "widest point - on a model that narrows below a wide top (a "
+                    "mushroom, a figure with outstretched arms) the clamp wing on "
+                    "the channel's side no longer reaches out as far as the widest "
+                    "point all the way down. With clamp wings the wing carries on "
+                    "over the pipe, so it is still clamped (and keyed, and bolted) "
+                    "there",
+        default=False,
+    )
     channel_flip: BoolProperty(
         name="Other Side",
         description="Put the bottom-fill channel on the other end of the parting seam "

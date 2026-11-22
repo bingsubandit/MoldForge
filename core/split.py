@@ -656,11 +656,10 @@ def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
         for z in picks:
             if h_sign == chan_sign:
                 # the pipe is the outermost point here: key off the wing's own edge
-                t_edge = _channel.wing_edge(chan, z)
-                t_max = _channel.key_room(chan, z, dims.R + dims.clear)
-                if t_edge is None or t_max is None:
+                t_key = _channel.key_spot(chan, z, dims.R + dims.clear, inset)
+                if t_key is None:
                     continue
-                hc = fr.center[h] + h_sign * min(t_edge - inset, t_max)
+                hc = fr.center[h] + h_sign * t_key
                 seam_here = seam
                 if parting is not None:
                     s_ = parting_at(parting, hc, z)
@@ -733,11 +732,11 @@ def _add_radial_wing_keys(parts, center, mn, mx, props, coll, n, master, bolt_zs
                 fc = chan["frame"].center
                 shift = (Vector((fc.x, fc.y, 0.0)) - Vector((center.x, center.y, 0.0))).dot(d)
                 t_edge = _channel.wing_edge(chan, z)
-                t_max = _channel.key_room(chan, z, dims.R + dims.clear)
-                if t_edge is None or t_max is None:
+                t_key = _channel.key_spot(chan, z, dims.R + dims.clear, inset)
+                if t_edge is None or t_key is None:
                     continue
                 tip = t_edge + shift
-                r = min(t_edge - inset, t_max) + shift
+                r = t_key + shift
             if (tip - tipm < offset + 0.6 * dims.width
                     or r - dims.R - dims.clear < tipm + offset):
                 continue                       # no flange standing clear of the wall
