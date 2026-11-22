@@ -440,12 +440,20 @@ def stl_defects(obj):
     return int((ecount != 2).sum()), int((tcount - 1).sum())
 
 
-def _finish_mesh(obj, vid, dissolve):
-    """One attempt for ``finish_for_export`` on ``obj.data`` (in place)."""
+def _finish_mesh(obj, vid, dissolve, bad_polys):
+    """One attempt for ``finish_for_export`` on ``obj.data`` (in place). Only the
+    polygons on a defect (``bad_polys``), those round a welded corner, and their
+    neighbours are split into triangles - the rest of the mesh is left as it
+    was."""
     bm = bmesh.new()
     try:
         bm.from_mesh(obj.data)
         bm.verts.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        tag = bm.faces.layers.int.new("mf_fix")
+        for fi in bad_polys:
+            if fi < len(bm.faces):
+                bm.faces[fi][tag] = 1
         # Exactly the corners the STL reader joins - a distance weld would also
         # pull genuinely separate, close vertices together.
         first, targetmap = {}, {}
@@ -453,13 +461,21 @@ def _finish_mesh(obj, vid, dissolve):
             keep = first.setdefault(int(vid[v.index]), v)
             if keep is not v:
                 targetmap[v] = keep
+        for v in targetmap:
+            for f in v.link_faces:
+                f[tag] = 1
+        for f in [f for f in bm.faces if f[tag]]:          # and one ring round them
+            for e in f.edges:
+                for g in e.link_faces:
+                    g[tag] = 1
         if targetmap:
             bmesh.ops.weld_verts(bm, targetmap=targetmap)
         if dissolve > 0.0:
             # zero-area faces between corners a hair apart: their triangles are
             # slivers that a neighbour's triangulation overlaps
             bmesh.ops.dissolve_degenerate(bm, dist=dissolve, edges=bm.edges[:])
-        bmesh.ops.triangulate(bm, faces=[f for f in bm.faces if len(f.verts) > 3],
+        bmesh.ops.triangulate(bm, faces=[f for f in bm.faces
+                                         if len(f.verts) > 3 and f[tag]],
                               quad_method='BEAUTY', ngon_method='BEAUTY')
         same = {}
         for f in bm.faces:
@@ -476,17 +492,42 @@ def _finish_mesh(obj, vid, dissolve):
         lv = [v for v in bm.verts if not v.link_edges]
         if lv:
             bmesh.ops.delete(bm, geom=lv, context='VERTS')
+        bm.faces.layers.int.remove(tag)
         bm.to_mesh(obj.data)
         obj.data.update()
     finally:
         bm.free()
 
 
+def _stl_bad_polygons(obj, vid):
+    """Indices of the polygons whose triangles sit on an STL defect: an edge not
+    shared by exactly two triangles, or a triangle another repeats."""
+    import numpy as np
+    me = obj.data
+    me.calc_loop_triangles()
+    n = len(me.loop_triangles)
+    tri = np.empty(n * 3, dtype=np.int64)
+    me.loop_triangles.foreach_get("vertices", tri)
+    poly = np.empty(n, dtype=np.int64)
+    me.loop_triangles.foreach_get("polygon_index", poly)
+    ids = vid[tri.reshape(-1, 3)]
+    edges = np.sort(np.concatenate([ids[:, [0, 1]], ids[:, [1, 2]], ids[:, [2, 0]]]),
+                    axis=1)
+    _e, einv, ecount = np.unique(edges, axis=0, return_inverse=True,
+                                 return_counts=True)
+    bad_tri = (ecount[einv.reshape(-1)] != 2).reshape(3, n).any(axis=0)
+    _t, tinv, tcount = np.unique(np.sort(ids, axis=1), axis=0, return_inverse=True,
+                                 return_counts=True)
+    bad_tri |= tcount[tinv.reshape(-1)] > 1
+    return set(poly[bad_tri].tolist())
+
+
 def finish_for_export(obj):
     """Make the mesh what its STL will be, so the export is as clean as the part:
-    weld vertices the file writes at one position, split the faces into the
-    triangles the file will hold, and delete triangles that come in back-to-back
-    pairs (a zero-thickness fin; one of each pair faces inwards). Where that is
+    weld vertices the file writes at one position, split the faces on a defect
+    (and their neighbours) into the triangles the file will hold, and delete
+    triangles that come in back-to-back pairs (a zero-thickness fin; one of each
+    pair faces inwards). Where that is
     not enough, zero-area faces between corners a hair apart are dissolved
     first, at growing tolerances (micrometres - a wider dissolve can open the
     mesh elsewhere). The first attempt that leaves no STL defects wins, else the
@@ -500,13 +541,14 @@ def finish_for_export(obj):
         return before
     was_valid = part_is_valid(obj)[0]
     vid = _stl_vertex_ids(obj)
+    bad_polys = _stl_bad_polygons(obj, vid)
     reach = max(float(abs(stl_positions(obj)).max()), 1.0)
     orig = obj.data
     best, best_mesh = before, None
     for dissolve in (0.0, reach * 1e-7, reach * 1e-6, reach * 1e-5):
         trial = orig.copy()
         obj.data = trial
-        _finish_mesh(obj, vid, dissolve)
+        _finish_mesh(obj, vid, dissolve, bad_polys)
         got = stl_defects(obj)
         ok = sum(got) < sum(best) and (not was_valid or part_is_valid(obj)[0])
         obj.data = orig               # (a mesh still in use can't be removed)

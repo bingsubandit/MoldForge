@@ -152,7 +152,9 @@ def _rename(obj, name):
 # --- geometry helpers ----------------------------------------------------- #
 
 def part_face_count(obj):
-    return len(obj.data.polygons)
+    """Triangles the part prints as (n - 2 per n-gon): unchanged when a part
+    is partly split into triangles for a clean STL, unlike its polygon count."""
+    return sum(len(p.vertices) - 2 for p in obj.data.polygons)
 
 
 def nonmanifold_edges(obj):
