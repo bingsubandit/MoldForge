@@ -16,7 +16,7 @@ from . import util
 
 
 def split_parts(mold, master, axis, props, coll, wall, radial_center=None,
-                wing_bolt_zs=None, parting=None, wing_offset=0.0, wing_skip=()):
+                wing_bolt_zs=None, parting=None, wing_offset=0.0, wing_chan=None):
     """Split the mold body into the requested number of printable pieces.
 
     Two pieces use the contoured/planar parting (with keys/teeth/wings). Three or
@@ -29,17 +29,17 @@ def split_parts(mold, master, axis, props, coll, wall, radial_center=None,
     shift the mold's bounding box, so re-deriving the centre would miss them).
     ``wing_bolt_zs`` is the bolt heights the 2-part wings drilled (None = no wings) —
     the wing alignment keys are placed between them. ``wing_offset`` (the mold
-    wall's offset from the model) steers the radial wing keys; ``wing_skip``
-    lists where the wing keys must stay off (the bottom-fill channel): radial
-    seam indices, or for two pieces the side (+1/-1 along the wing) it runs on."""
+    wall's offset from the model) steers the radial wing keys; ``wing_chan`` is
+    the bottom-fill channel's geometry (``channel.build_channel``) when one runs
+    up a seam: the keys on its side sit on the wing inboard of the pipe."""
     n = max(int(getattr(props, "parts_count", 2)), 2)
     if n <= 2:
         half_a, half_b = split(mold, master, axis, props, coll, wall,
                                wing_bolt_zs=wing_bolt_zs, parting=parting,
-                               wing_skip=wing_skip)
+                               wing_chan=wing_chan)
         return [half_a, half_b]
     return _split_radial(mold, master, props, coll, wall, n, center=radial_center,
-                         wing_offset=wing_offset, wing_skip=wing_skip)
+                         wing_offset=wing_offset, wing_chan=wing_chan)
 
 
 def resolve_axis(props, obj):
@@ -66,7 +66,7 @@ def _valid(obj):
 
 
 def split(mold, master, axis, props, coll, wall, wing_bolt_zs=None, parting=None,
-          wing_skip=()):
+          wing_chan=None):
     """``parting`` (from ``parting_surface``, built before the clamp wings) is the
     contoured surface the wings were cut along: the halves are split on exactly
     that surface, so each half keeps its half of every wing."""
@@ -128,7 +128,7 @@ def split(mold, master, axis, props, coll, wall, wing_bolt_zs=None, parting=None
             and getattr(props, "wing_keys", 'NONE') != 'NONE'):
         _record_wing_keys(props, _add_wing_keys(
             half_a, half_b, props, axis, ai, mn, mx, coll, off, wing_bolt_zs,
-            parting=parting if contoured_used else None, skip_sides=wing_skip))
+            parting=parting if contoured_used else None, chan=wing_chan))
 
     return half_a, half_b
 
@@ -621,7 +621,7 @@ def _seat_wing_key(keyed, mating, male, socket, coll):
 
 
 def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
-                   parting=None, skip_sides=()):
+                   parting=None, chan=None):
     """Wing Alignment keys: a raised key on half_a's clamp-wing mating face seats into
     a matching socket in half_b, so the bolted halves can't shear sideways. Three
     shapes (the Wing Alignment option): CONE — a pointed pin, self-centering; DOME — a
@@ -631,10 +631,12 @@ def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
     dome becomes a wide spherical cap when the lip is shallow); its height comes from
     ``_wing_key_dims``. Keys are spread along the seam at the Key Spacing pitch,
     dodging the drilled bolt holes (``bolt_zs``); the socket is the same shape grown
-    by the Fit Clearance so printed parts actually seat. ``skip_sides`` lists the
-    wing sides (+1/-1 along the wing) to leave bare: the bottom-fill channel's pipe
-    runs up that wing, and a key there would sit on it. Best-effort with rollback: a
-    key that would leave either half invalid is skipped, never breaking a good mold."""
+    by the Fit Clearance so printed parts actually seat. ``chan`` is the bottom-fill
+    channel when its pipe runs up one side of the wing: the outermost point there is
+    the pipe, so that side's keys are placed from the wing's own edge (measured
+    before the pipe went on) and kept off the pipe and its gate. Best-effort with
+    rollback: a key that would leave either half invalid is skipped, never breaking
+    a good mold."""
     dims = _wing_key_dims(props)
     if dims is None:
         return 0
@@ -644,18 +646,33 @@ def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
     reach = (mx - mn).length + 10.0
     picks = _wing_key_heights(mn.z, mx.z, dims.R, dims.spacing, bolt_zs, props)
 
+    from . import channel as _channel
+    inset = max(dims.width * 0.45, dims.R + 1.2)
+    fr = chan["frame"] if chan is not None and not chan["frame"].multipart else None
+    chan_sign = None if fr is None else (1.0 if fr.d[h] > 0 else -1.0)
+
     placed = 0
     for h_sign in (1.0, -1.0):
-        if any(h_sign * s > 0 for s in skip_sides):
-            continue
         for z in picks:
-            # probe inside A's wing lip, on the parting surface (contoured or flat)
-            found = wing_tip(half_a, parting, center, z, h_sign, reach, seam, ai, h,
-                             bias=dims.bias)
-            if found is None:
-                continue
-            tip, seam_here = found
-            hc = tip - h_sign * max(dims.width * 0.45, dims.R + 1.2)
+            if h_sign == chan_sign:
+                # the pipe is the outermost point here: key off the wing's own edge
+                t_edge = _channel.wing_edge(chan, z)
+                t_max = _channel.key_room(chan, z, dims.R + dims.clear)
+                if t_edge is None or t_max is None:
+                    continue
+                hc = fr.center[h] + h_sign * min(t_edge - inset, t_max)
+                seam_here = seam
+                if parting is not None:
+                    s_ = parting_at(parting, hc, z)
+                    seam_here = s_ if s_ is not None else seam
+            else:
+                # probe inside A's wing lip, on the parting surface (contoured or flat)
+                found = wing_tip(half_a, parting, center, z, h_sign, reach, seam, ai, h,
+                                 bias=dims.bias)
+                if found is None:
+                    continue
+                tip, seam_here = found
+                hc = tip - h_sign * inset
             if parting is not None:
                 s_key = parting_at(parting, hc, z)
                 seam_here = s_key if s_key is not None else seam_here
@@ -670,7 +687,7 @@ def _add_wing_keys(half_a, half_b, props, axis, ai, mn, mx, coll, off, bolt_zs,
 
 
 def _add_radial_wing_keys(parts, center, mn, mx, props, coll, n, master, bolt_zs,
-                          offset, skip=()):
+                          offset, chan=None):
     """Wing Alignment keys for a radial split: up each seam's clamp flange, a key on
     one wedge's lip seats into a socket in its neighbour's, so bolted wedges can't
     shear along the seam. Same shapes, sizing, pitch and bolt dodging as the
@@ -679,8 +696,9 @@ def _add_radial_wing_keys(parts, center, mn, mx, props, coll, n, master, bolt_zs
     Seam ``k`` runs out from ``center`` along angle 2 pi k / n, between wedge ``k``
     (which takes the key) and wedge ``k - 1`` (the socket). A key is placed only
     where the flange stands clear of the mold wall (the model, ``master``, grown by
-    ``offset``), so a socket never reaches into the cavity; ``skip`` lists seams to
-    leave alone (the bottom-fill channel's). Each key is built in a seam-aligned
+    ``offset``), so a socket never reaches into the cavity. ``chan`` is the
+    bottom-fill channel, which runs up the first seam: there the keys are placed
+    from the flange's own edge, off the pipe and its gate. Each key is built in a seam-aligned
     frame - local X out along the seam, +Y into wedge k - then turned into place.
     Best-effort with rollback. Returns the number of keys placed."""
     dims = _wing_key_dims(props)
@@ -691,10 +709,10 @@ def _add_radial_wing_keys(parts, center, mn, mx, props, coll, n, master, bolt_zs
     zero = Vector((0.0, 0.0, 0.0))
     inset = max(dims.width * 0.45, dims.R + 1.2)
 
+    from . import channel as _channel
+    on_chan = chan is not None and chan["frame"].multipart
     placed = 0
     for k in range(n):
-        if k in skip:
-            continue
         theta = 2.0 * math.pi * k / n
         d = Vector((math.cos(theta), math.sin(theta), 0.0))
         nrm = Vector((-math.sin(theta), math.cos(theta), 0.0))   # into wedge k
@@ -710,6 +728,16 @@ def _add_radial_wing_keys(parts, center, mn, mx, props, coll, n, master, bolt_zs
             tip = (loc - Vector((center.x, center.y, loc.z))).dot(d)
             tipm = (lm - Vector((center.x, center.y, lm.z))).dot(d)
             r = tip - inset
+            if k == 0 and on_chan:
+                # the pipe is the outermost point: key off the flange's own edge
+                fc = chan["frame"].center
+                shift = (Vector((fc.x, fc.y, 0.0)) - Vector((center.x, center.y, 0.0))).dot(d)
+                t_edge = _channel.wing_edge(chan, z)
+                t_max = _channel.key_room(chan, z, dims.R + dims.clear)
+                if t_edge is None or t_max is None:
+                    continue
+                tip = t_edge + shift
+                r = min(t_edge - inset, t_max) + shift
             if (tip - tipm < offset + 0.6 * dims.width
                     or r - dims.R - dims.clear < tipm + offset):
                 continue                       # no flange standing clear of the wall
@@ -775,7 +803,7 @@ def cut_stack(parts, coll, seam_zs):
 # --- Radial multi-part split (3-4 wedges around the vertical axis) ---------- #
 
 def _split_radial(mold, master, props, coll, wall, n, center=None, wing_offset=0.0,
-                  wing_skip=()):
+                  wing_chan=None):
     """Carve the mold into ``n`` equal wedges around the vertical axis through its
     centre. Each wedge is the mold intersected with a pie-slice prism; intersecting
     two watertight solids keeps each wedge watertight. Adjacent wedges then get a
@@ -817,7 +845,7 @@ def _split_radial(mold, master, props, coll, wall, n, center=None, wing_offset=0
             and getattr(props, "wing_keys", 'NONE') != 'NONE'):
         _record_wing_keys(props, _add_radial_wing_keys(
             parts, center, mn, mx, props, coll, n, master, bolt_zs, wing_offset,
-            skip=wing_skip))
+            chan=wing_chan))
     return parts
 
 

@@ -20,7 +20,10 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 - **Fixed: wing alignment keys on the bottom-fill channel's pipe.** On a
   2-piece mold the keys were placed up both sides of the clamp wing, including
   the side the channel's pipe runs up, so cones stood on the pipe. That side
-  is now left bare (radial molds already kept off the channel's seam).
+  now gets its keys where they would sit without the channel: from the wing's
+  own edge (measured before the pipe is welded on), kept off the pipe, and
+  skipped only where the gate's tube crosses the wing near the floor. Radial
+  molds do the same on the channel's seam instead of leaving it bare.
 - **Fixed: exported STLs with non-manifold edges and inverted, doubled
   triangles** on parts Blender reported as watertight. An STL joins triangles
   wherever their corners share a position, so two vertices at one spot (some
@@ -41,7 +44,7 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
   every seam's clamp flange the same way 2-piece molds do (same shapes, size,
   height and spacing, dodging the bolts); the Alignment setting shows for any
   piece count. Keys go only where the flange stands clear of the mold wall,
-  and stay off the bottom-fill channel's seam.
+  and on the bottom-fill channel's seam stay off its pipe.
 - **Changed: wing alignment keys are on by default** (Cone). Set Alignment to
   None for the old behaviour. A preset that saved None keeps it.
 - **New: Mold Detail** (Mesh Prep). A messy or heavy model's mold body and

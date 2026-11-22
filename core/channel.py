@@ -261,7 +261,31 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
     return {"frame": frame, "t_pipe": t_pipe, "t_cav": t_cav, "gate_z": gate_z,
             "z0": z0, "throat": throat, "apex": apex, "bore_r": bore_r,
             "mouth_r": mouth_r, "open_below": open_below, "floor_z": floor_z,
-            "cup": (tp.x, tp.y, mouth_r + wall)}, ""
+            "cup": (tp.x, tp.y, mouth_r + wall), "reach": reach,
+            "tube_out": tube_out}, ""
+
+
+def wing_edge(geo, z):
+    """How far out along the channel's seam (``t`` from its frame's centre)
+    the mold reached at height ``z`` before the channel was welded on: the
+    clamp wing's own edge there, which the pipe now hides. The nearer of the
+    two sampled heights round ``z`` (the wing may dip between them); None
+    outside the sampled heights."""
+    rows = [(zz, r) for zz, r in geo.get("reach", ()) if r is not None]
+    for (z0, r0), (z1, r1) in zip(rows, rows[1:]):
+        if z0 <= z <= z1:
+            return min(r0, r1)
+    return None
+
+
+def key_room(geo, z, key_r):
+    """Where a wing key of radius ``key_r`` (its socket's, fit clearance
+    included) may sit on the channel's side at height ``z``: the furthest
+    ``t`` out from the frame's centre that keeps it off the pipe, or None
+    where the gate's tube crosses the wing (just above the floor)."""
+    if abs(z - geo["gate_z"]) < geo["tube_out"] + key_r + 0.5:
+        return None
+    return geo["t_pipe"] - geo["tube_out"] - key_r - 0.3
 
 
 def bore_channel(mold, geo, coll):

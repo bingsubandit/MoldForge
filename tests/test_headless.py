@@ -2595,6 +2595,7 @@ def main():
         def _spy_bore_k(mold, geo, coll):
             fr = geo["frame"]
             seen_k["axis"] = fr.point(geo["t_pipe"], geo["gate_z"])
+            seen_k["center"] = fr.center.copy()
             seen_k["tube_r"] = geo["bore_r"] + max(2.0, 1.6)   # bore + shell wall
             return real_bore_k(mold, geo, coll)
 
@@ -2628,6 +2629,20 @@ def main():
         check(not clash and len(seen_k["keys"]) > 0,
               f"{n_parts} pieces: {len(seen_k['keys'])} wing keys, none on the channel's "
               f"pipe (keys within reach of it: {clash or 'none'})")
+        # ... but the channel's side keeps its keys: there is room on the wing
+        # inboard of the pipe, where they sit without a channel (user report)
+        cen_ = seen_k.get("center")
+        on_side = 0
+        if ax is not None and cen_ is not None:
+            dir_ = Vector((ax.x - cen_.x, ax.y - cen_.y, 0.0)).normalized()
+            for c_, _r in seen_k["keys"]:
+                v_ = Vector((c_.x - cen_.x, c_.y - cen_.y, 0.0))
+                if v_.length > 1e-6 and v_.normalized().dot(dir_) > 0.94:
+                    on_side += 1
+        others_ = (len(seen_k["keys"]) - on_side) / max(n_parts - 1, 1)
+        check(on_side >= 1 and on_side >= others_,
+              f"{n_parts} pieces: the channel's side of the wing keeps its keys, as "
+              f"many as the other sides ({on_side} of {len(seen_k['keys'])} there)")
 
     # The user's fairy house: 16 specks and stray triangles floating by an
     # otherwise watertight model. Heal used to run only on a model that was
