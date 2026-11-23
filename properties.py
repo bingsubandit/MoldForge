@@ -784,6 +784,15 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
                     "there",
         default=False,
     )
+    channel_smooth: FloatProperty(
+        name="Smoothing",
+        description="How gently a Follow Model pipe bends: 0 hugs the case as "
+                    "tightly as it can (leaning up to 80 degrees from vertical), "
+                    "0.5 leans at most 45 degrees, 1 at most 15 (a gentle sweep). "
+                    "Smoothing only ever moves the pipe further out from the case, "
+                    "never closer, so the wing on its side grows a little",
+        default=0.5, min=0.0, max=1.0, subtype='FACTOR',
+    )
     channel_flip: BoolProperty(
         name="Other Side",
         description="Put the bottom-fill channel on the other end of the parting seam "

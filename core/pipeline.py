@@ -619,7 +619,8 @@ def _build_once(master, props, trim_ok=False):
                 chan, chan_note = channel.build_channel(
                     mold, cavity_cutter, shape_ref, p, frame, floor_z, coll,
                     open_below=open_below, hug=getattr(p, "channel_hug", False),
-                    wing=_channel_wing(p, axis, multipart, wing_bolt_zs))
+                    wing=_channel_wing(p, axis, multipart, wing_bolt_zs),
+                    keep_out=[(f["x"], f["y"], f["mouth_out"]) for f in funnels])
             except Exception as exc:                  # never fails the mold
                 chan, chan_note = None, f"the bottom-fill channel failed ({exc})"
                 for o in list(coll.objects):
@@ -1562,6 +1563,7 @@ def _derive_sizes(work, props):
         channel_radius=getattr(props, "channel_radius", 4.0),
         channel_flip=getattr(props, "channel_flip", False),
         channel_hug=getattr(props, "channel_hug", False),
+        channel_smooth=getattr(props, "channel_smooth", 0.5),
         vent_place=getattr(props, "vent_place", 'AUTO'),
         funnel_height=getattr(props, "funnel_height", 12.0),
         sprue_flare=getattr(props, "sprue_flare", 2.4),

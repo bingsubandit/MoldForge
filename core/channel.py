@@ -181,7 +181,7 @@ def _sheet(name, frame, rows, thick, coll):
 
 
 def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=False,
-                  hug=False, wing=None):
+                  hug=False, wing=None, keep_out=()):
     """Weld the channel's pipe, fin and mouth onto the still-solid ``mold``
     (before the cavity is carved). ``floor_z`` is the lowest height the gate may
     open into the cavity (the cavity floor, a key plate's rim, a Locking Base's
@@ -194,7 +194,10 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
     ``ext``, ``bolt_r``, ``bolt_zs``, ``axis``) is the clamp wing when there is
     one: its channel side is then rebuilt at full thickness out to ``ext``
     beyond the pipe, so it can still be clamped (and keyed) over the pipe, and
-    its bolt holes there are drilled again outboard of the pipe.
+    its bolt holes there are drilled again outboard of the pipe. ``keep_out``
+    lists the top pour funnels as ``(x, y, radius)``: a Follow Model pipe that
+    tops out near the middle of the model is moved out until its mouth stands
+    clear of them.
 
     Returns the geometry the bore phase needs, or ``(None, reason)``."""
     mn, mx = util.world_bbox(mold)
@@ -238,12 +241,18 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
 
     path = edge_rows = None
     if hug:
-        path, shell = _hug_path(cavity, frame, z0, throat, far, wall, bore_r)
+        smooth = getattr(props, "channel_smooth", 0.5)
+        path, shell = _hug_path(cavity, frame, z0, throat, far, wall, bore_r,
+                                tube_out, smooth=smooth)
         if path is None:
             return None, "the channel found no cavity wall to follow"
+        t_min = _clear_of(frame, path[-1][1], throat, mouth_r + wall, keep_out, far)
+        if t_min > path[-1][1] + 1e-6:
+            path, shell = _hug_path(cavity, frame, z0, throat, far, wall, bore_r,
+                                    tube_out, smooth=smooth, t_top=t_min)
         t_pipe = _interp(path, gate_z)
         pipe_pts = [frame.point(t, z) for z, t in path]
-        pipe = _sweep("MF_chan", pipe_pts, tube_out, coll)
+        pipe = _tube("MF_chan", _stub(pipe_pts, tube_out), tube_out, coll)
         reach_at = dict(reach)
         rows, edge_rows = [], []
         for (z, t), (_z, sh) in zip(path, shell):
@@ -263,7 +272,7 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
         steps = max(int((throat - z0) / 4.0), 2)
         pipe_pts = [frame.point(t_pipe, z0 + (throat - z0) * i / steps)
                     for i in range(steps + 1)]
-        pipe = _sweep("MF_chan", pipe_pts, tube_out, coll)
+        pipe = _tube("MF_chan", _stub(pipe_pts, tube_out), tube_out, coll)
         # Fin: from the mold's surface out to the pipe at every height, so the
         # pipe is never a cantilever where the model narrows.
         rows = []
@@ -324,15 +333,27 @@ def _nearest(rows, z):
     return None if best is None else best[1]
 
 
-def _hug_path(cavity, frame, z0, throat, far, wall, bore_r, step=2.0):
+def _hug_path(cavity, frame, z0, throat, far, wall, bore_r, tube_out, step=2.0,
+              smooth=0.5, t_top=None):
     """The Follow Model pipe's axis: ``(z, t)`` every ``step`` mm from ``z0`` up
     to the throat, just outside the case - the cavity's reach plus the wall is
     the case's outside there, and the bore sits a little beyond it. Each height
     takes the widest case within a bore's radius above and below, so the bore
     never cuts into a ledge it passes under (a mushroom's cap). Heights with no
     cavity on the seam (above the top, below the floor) take the nearest that
-    has one. Also returns the case's own outline, ``(z, t)``. ``(None, None)``
-    if the seam never meets the cavity."""
+    has one.
+
+    ``smooth`` (0 to 1, the Smoothing setting) limits how sharply the pipe
+    may bend: it may lean at most ``smooth_angle(smooth)`` from vertical, and
+    where the case changes faster the pipe is moved OUT - never in - until it
+    doesn't (the least pipe that stays outside the case and leans no more).
+
+    The last stretch below the throat (a tube's radius and 2 mm) runs straight
+    up, at least ``t_top`` out: the mouth is an upright cup on a flat base,
+    and a pipe arriving at a lean left a gap under it that the bore cut open.
+
+    Also returns the case's own outline, ``(z, t)``. ``(None, None)`` if the
+    seam never meets the cavity."""
     n = max(int((throat - z0) / step), 2)
     zs = [z0 + (throat - z0) * i / n for i in range(n + 1)]
     raw = [(z, _reach(cavity, frame.point, frame.d, z, far)) for z in zs]
@@ -344,7 +365,91 @@ def _hug_path(cavity, frame, z0, throat, far, wall, bore_r, step=2.0):
     for z, _t in shell:
         widest = max(t for zz, t in shell if abs(zz - z) <= win)
         path.append((z, widest + bore_r + 0.6))
-    return path, shell
+    # Bend limit: sweep up and down, pulling each point out to within the
+    # allowed lean of its neighbour - the least smooth curve above the path.
+    lean = math.tan(math.radians(smooth_angle(smooth)))
+    t = [tt for _z, tt in path]
+    run = [i for i, (z, _t) in enumerate(path) if z >= throat - tube_out - 2.0]
+    for _ in range(3):
+        top = max([t[i] for i in run] + ([t_top] if t_top is not None else []))
+        for i in run:
+            t[i] = top
+        for order in (range(1, len(t)), range(len(t) - 2, -1, -1)):
+            for i in order:
+                j = i - 1 if order.step > 0 else i + 1
+                dz = abs(path[i][0] - path[j][0])
+                t[i] = max(t[i], t[j] - lean * dz)
+        if max(t[i] for i in run) - min(t[i] for i in run) < 1e-6:
+            break
+    return [(z, tt) for (z, _o), tt in zip(path, t)], shell
+
+
+def _clear_of(frame, t, z, cup_r, keep_out, far):
+    """The least ``t`` (from ``t`` outward) at which a mouth of radius
+    ``cup_r`` at height ``z`` stands 1.5 mm clear of every ``(x, y, r)`` in
+    ``keep_out`` (the top pour funnels)."""
+    while t < far:
+        p = frame.point(t, z)
+        if all(math.hypot(p.x - x, p.y - y) >= r + cup_r + 1.5 for x, y, r in keep_out):
+            return t
+        t += 0.5
+    return t
+
+
+def _stub(pts, r):
+    """``pts`` with a short upright stub on the end: the mouth is an upright
+    cup on a flat base at the throat, and a pipe arriving at any lean (a
+    contoured seam leans it, so does Follow Model) left a wedge of gap under
+    the cup's base that the bore then cut open."""
+    top = Vector(pts[-1])
+    return list(pts) + [Vector((top.x, top.y, top.z + r))]
+
+
+def _tube(name, pts, r, coll, angle=15.0):
+    """A round tube of radius ``r`` along a polyline that may bend sharply. One
+    sweep folds over itself on the inside of a sharp bend (a hole in the
+    wall once it is welded on), so the line is cut at every bend of more
+    than ``angle`` degrees into nearly straight runs, each swept on its own,
+    with a ball at each bend, all united into one solid."""
+    pts = [Vector(p) for p in pts]
+    bends = set(id(b) for b in _bends(pts, angle))
+    runs, cur = [], [pts[0]]
+    for p in pts[1:]:
+        cur.append(p)
+        if id(p) in bends:
+            runs.append(cur)
+            cur = [p]
+    runs.append(cur)
+    pieces = [_sweep(name, run, r, coll) for run in runs if len(run) >= 2]
+    pieces += [util.add_sphere(name, p, r, coll, subdiv=3)
+               for p in pts if id(p) in bends]
+    pieces = [o for o in pieces if o is not None]
+    if not pieces:
+        return None
+    tube = pieces[0]
+    for o in pieces[1:]:
+        util.boolean(tube, o, 'UNION')
+        util.remove_object(o)
+    return tube
+
+
+def _bends(pts, angle=15.0):
+    """The inner points of a polyline where it turns by more than ``angle``
+    degrees."""
+    out = []
+    for a, b, c in zip(pts, pts[1:], pts[2:]):
+        u, v = b - a, c - b
+        if u.length > 1e-6 and v.length > 1e-6 and u.angle(v) > math.radians(angle):
+            out.append(b)
+    return out
+
+
+def smooth_angle(smooth):
+    """The steepest lean from vertical (degrees) the Follow Model pipe may
+    take at Smoothing ``smooth``: 80 at 0 (it follows nearly every step of
+    the case), 45 at 0.5, 15 at 1 (a gentle sweep)."""
+    s = min(max(float(smooth), 0.0), 1.0)
+    return 80.0 - 70.0 * s if s <= 0.5 else 45.0 - 60.0 * (s - 0.5)
 
 
 def _redrill_bolts(mold, geo, wing, coll):
@@ -440,7 +545,8 @@ def bore_channel(mold, geo, coll):
                for i in range(steps + 1)]
     top_pt = fr.point(axis_at(geo, geo["throat"]), geo["throat"])
     pts.append(Vector((top_pt.x, top_pt.y, geo["apex"] + 1.0)))
-    cutters = [_sweep("MF_chanbore", pts, r, coll)]
+    cutters = [_tube("MF_chanbore", pts, r, coll) if geo.get("path")
+               else _sweep("MF_chanbore", pts, r, coll)]
     # the gate: from the pipe's axis in along the seam, 2 mm into the cavity
     t_end = geo["t_cav"] - 2.0
     n = max(int((tp - t_end) / 2.0), 2)

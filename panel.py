@@ -836,6 +836,8 @@ class MOLDFORGE_PT_pour(_MFSub, bpy.types.Panel):
             col = layout.column(align=True)
             col.prop(props, "channel_radius", text="Channel radius")
             col.prop(props, "channel_hug", text="Follow model")
+            if props.channel_hug:
+                col.prop(props, "channel_smooth", text="Smoothing")
             col.prop(props, "channel_flip", text="Other side")
             layout.label(text="Pour beside the model, fills from the base",
                          icon='INFO')

@@ -4,6 +4,21 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+- **Fixed: a Follow Model pipe that wasn't sealed or couldn't be poured**
+  (user report on the mushroom). Its mouth could sit under the top pour funnel,
+  which capped it; the pipe arrived at the mouth leaning, leaving a hole under
+  the mouth's base; and at a sharp bend the swept tube folded over itself,
+  leaving holes in its wall near the stem. The pipe now runs straight up for
+  its last stretch, its mouth is moved out until it stands clear of every top
+  funnel, and it is built from nearly straight runs joined by a ball at each
+  bend (the bore too). Every channel test now checks that the pipe is walled in
+  all round, open from the mouth to the gate, with its mouth open to the sky
+  and never climbing on the way down.
+- **New: Smoothing for a Follow Model channel** (0 to 1, default 0.5). On some
+  models the pipe bent too sharply round the case. Smoothing caps its lean
+  from vertical: 80 degrees at 0 (the tightest hug), 45 at 0.5, 15 at 1 (a
+  gentle sweep). It only ever moves the pipe out from the case, never closer,
+  so the wing on that side grows a little as it smooths.
 - **New: Follow Model for the bottom-fill channel.** The channel's pipe stood
   straight up at the mold's widest point, so on a model that narrows under a
   wide top (the user's mushroom) the clamp wing on its side was as wide as the

@@ -348,6 +348,99 @@ def make_messy_master(name="Model", open_bottom=False):
     return o
 
 
+def make_spire_master(name="Spire", r=25.0, h_body=50.0, h_tip=40.0, seg=64):
+    """A cylinder rising into a cone that ends in a point: a Follow Model pipe
+    climbing the cone heads in to the middle, right under the top funnel."""
+    bm = bmesh.new()
+    rings = []
+    for z, rr in ((0.0, r), (h_body, r), (h_body + h_tip * 0.5, r * 0.5),
+                  (h_body + h_tip * 0.9, r * 0.1)):
+        rings.append([bm.verts.new((rr * math.cos(2 * math.pi * i / seg),
+                                    rr * math.sin(2 * math.pi * i / seg), z))
+                      for i in range(seg)])
+    for a, b in zip(rings, rings[1:]):
+        for i in range(seg):
+            k = (i + 1) % seg
+            bm.faces.new((a[i], a[k], b[k], b[i]))
+    tip = bm.verts.new((0.0, 0.0, h_body + h_tip))
+    for i in range(seg):
+        bm.faces.new((rings[-1][i], rings[-1][(i + 1) % seg], tip))
+    bm.faces.new(list(reversed(rings[0])))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    o = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(o)
+    return o
+
+
+def pipe_probe(geo):
+    """Where to test a bottom-fill channel, worked out from its geometry while
+    the build still has its parting surface (call it from a ``bore_channel``
+    spy); ``pipe_faults`` then tests the finished parts there."""
+    from moldforge.core import channel as _c
+    fr = geo["frame"]
+
+    def dist_line(q, pts):
+        best = 1e9
+        for a, b in zip(pts, pts[1:]):
+            ab = b - a
+            f = max(0.0, min(1.0, (q - a).dot(ab) / max(ab.length_squared, 1e-12)))
+            best = min(best, (q - (a + ab * f)).length)
+        return best
+    bore, tube = geo["bore_r"], geo["tube_out"]
+    zs = [geo["gate_z"] + (geo["throat"] - geo["gate_z"]) * i / 60 for i in range(61)]
+    pts = [fr.point(_c.axis_at(geo, z), z) for z in zs]
+    wall = []
+    for i, (z, p) in enumerate(zip(zs, pts)):
+        if abs(z - geo["gate_z"]) < tube + 1.0:
+            continue                               # the gate's own opening
+        tan = (pts[min(i + 1, 60)] - pts[max(i - 1, 0)]).normalized()
+        u = (fr.n - tan * fr.n.dot(tan)).normalized()
+        v = tan.cross(u)
+        for k in range(16):
+            a = 2.0 * math.pi * (k + 0.5) / 16
+            q = p + (u * math.cos(a) + v * math.sin(a)) * (bore + tube) * 0.5
+            # above the throat is the mouth, whose bore flares out (checked below)
+            if bore + 0.3 < dist_line(q, pts) < tube - 0.3 and q.z < geo["throat"] - 0.2:
+                wall.append((z, q))
+    top = fr.point(_c.axis_at(geo, geo["throat"]), geo["throat"])
+    mouth = [Vector((top.x, top.y, geo["throat"] + (geo["apex"] - geo["throat"]) * i / 10))
+             for i in range(11)]
+    path = geo.get("path") or []
+    return dict(axis=list(zip(zs, pts)), wall=wall, mouth=mouth,
+                sky=Vector((top.x, top.y, geo["apex"] + 0.5)),
+                uphill=[round(z0, 1) for (z0, _a), (z1, _b) in zip(path, path[1:])
+                        if z1 <= z0])
+
+
+def pipe_faults(probe, halves, home):
+    """Everything wrong with a bottom-fill channel as built, as a dict of lists
+    (all empty = a working channel): ``blocked`` - heights where the bore is
+    solid; ``leaks`` - heights with an open point in the pipe's wall (between
+    the bore and the outside of the tube, measured to the whole centre line,
+    so the far side of a bend counts as bore): a hole to the outside or into
+    the cavity; ``mouth`` - heights where the mouth's bore is solid; ``capped``
+    - parts over the mouth (a top funnel overhanging it); ``uphill`` - steps
+    where the pipe climbs back up on the way down to the gate."""
+    from moldforge.core import build as _b
+    dg = bpy.context.evaluated_depsgraph_get()
+
+    def solid(p):
+        return any(_b._inside_solid(o, p + home, dg) for o in halves)
+    out = dict(blocked=[round(z, 1) for z, p in probe["axis"] if solid(p)],
+               leaks=sorted({round(z, 1) for z, q in probe["wall"] if not solid(q)}),
+               mouth=[round(q.z, 1) for q in probe["mouth"] if solid(q)],
+               capped=[], uphill=list(probe["uphill"]))
+    sky = probe["sky"] + home
+    for o in halves:
+        mi = o.matrix_world.inverted()
+        if o.ray_cast(mi @ sky, (mi.to_3x3() @ Vector((0, 0, 1))).normalized())[0]:
+            out["capped"].append(o.name)
+    return out
+
+
 def make_multi_island_master():
     bm = bmesh.new()
     bmesh.ops.create_icosphere(bm, subdivisions=3, radius=6, matrix=Matrix.Translation((-9, 0, 0)))
@@ -2508,6 +2601,7 @@ def main():
         chan_seen["gate_wall"] = (gm + fr.n * (geo["bore_r"] + 0.8),
                                   gm - fr.n * (geo["bore_r"] + 0.8))
         chan_seen["geo"] = dict(geo)
+        chan_seen["probe"] = pipe_probe(geo)
         return real_bore_c(mold, geo, coll)
 
     mfchan.bore_channel = _spy_bore
@@ -2536,6 +2630,10 @@ def main():
         check(not bp and not bg,
               f"the channel is open from the mouth down the pipe and in along the gate "
               f"(blocked pipe {bp[:3]}, gate {bg[:3]})")
+        pf1 = pipe_faults(chan_seen["probe"], hc1, home_c)
+        check(not any(pf1.values()),
+              f"... and the straight pipe is walled in all the way round, its mouth "
+              f"open to the sky ({ {k_: v_[:4] for k_, v_ in pf1.items() if v_} })")
         check(g1 and g1["gate_z"] - g1["floor_z"] <= g1["bore_r"] + 0.5,
               f"the gate opens right above the cavity floor "
               f"({g1.get('gate_z', 0) - g1.get('floor_z', 0):.1f} mm up for a "
@@ -2593,6 +2691,7 @@ def main():
 
     def _spy_bore_h(mold, geo, coll):
         hug_seen["geo"] = dict(geo)
+        hug_seen["probe"] = pipe_probe(geo)
         return real_bore_h(mold, geo, coll)
 
     def _reach_h(parts, fr, home, z):
@@ -2660,6 +2759,78 @@ def main():
     check(gh_.get("bolts_redrilled", 0) >= 1 and hg_["keys"] >= 1,
           f"... with its bolt holes drilled again outboard of the pipe "
           f"({gh_.get('bolts_redrilled', 0)}) and wing keys ({hg_['keys']})")
+
+    # Smoothing (user request): some models bend the pipe too sharply. The
+    # pipe's lean is capped (15 degrees from vertical at 1), and smoothing only
+    # moves it out - never closer to the case than the tight path.
+    def _lean(path):
+        return max(abs(t1 - t0) / max(z1 - z0, 1e-9)
+                   for (z0, t0), (z1, t1) in zip(path, path[1:]))
+    sm_ = {}
+    mfchan_h.bore_channel = _spy_bore_h
+    try:
+        for smooth in (0.0, 0.5, 1.0):
+            reset_scene()
+            rs_ = pipeline.build_mold_system(make_bell_master("Bell"), _over(
+                default_props(), box_style='POUR_BOX', base_style='OPEN', wings=True,
+                parts_count=2, sprue=True, vent_count=0, pour_channel=True,
+                wing_keys='CONE', channel_hug=True, channel_smooth=smooth))
+            bpy.context.view_layer.update()
+            g_ = hug_seen["geo"]
+            halves_s = [q for q in rs_["parts"] if q.name.startswith("MF_Mold_")]
+            dgs = bpy.context.evaluated_depsgraph_get()
+            zs_s = [g_["gate_z"] + (g_["throat"] - g_["gate_z"]) * i / 30 for i in range(31)]
+            blk = [z for z in zs_s if any(mfbuild_h._inside_solid(
+                o, g_["frame"].point(mfchan_h.axis_at(g_, z), z) + rs_["positive"].location,
+                dgs) for o in halves_s)]
+            sm_[smooth] = dict(ok=all(mfutil.part_is_valid(q)[0] for q in rs_["parts"])
+                               and not blk, path=g_["path"],
+                               faults=pipe_faults(hug_seen["probe"], halves_s,
+                                                  rs_["positive"].location))
+    finally:
+        mfchan_h.bore_channel = real_bore_h
+    p0_, p1_ = sm_[0.0]["path"], sm_[1.0]["path"]
+    out_ = len(p0_) == len(p1_) and all(t1 >= t0 - 1e-6 for (_z, t0), (_z1, t1)
+                                        in zip(p0_, p1_))
+    check(sm_[0.0]["ok"] and sm_[1.0]["ok"],
+          "Smoothing 0 and 1: valid parts, the pipe open all the way")
+    check(_lean(p1_) <= math.tan(math.radians(15.0)) + 1e-6 and _lean(p0_) > 1.0 and out_,
+          f"... Smoothing 1 leans the pipe at most 15 degrees (steepest "
+          f"{math.degrees(math.atan(_lean(p1_))):.0f}, tight path "
+          f"{math.degrees(math.atan(_lean(p0_))):.0f}), only ever further out "
+          f"from the case ({out_})")
+    # User report: the pipe had a hole under its mouth (it arrived at a lean
+    # under the upright cup) and a top funnel capped its mouth; and a sharp
+    # bend can fold the swept tube open. A channel must be walled in all the
+    # way, open from the mouth to the gate, never climbing on the way down.
+    # A model that narrows to a point: following it, the pipe heads in under
+    # the top funnel, which capped its mouth (the user's mushroom).
+    mfchan_h.bore_channel = _spy_bore_h
+    try:
+        reset_scene()
+        rsp_ = pipeline.build_mold_system(make_spire_master(), _over(
+            default_props(), box_style='POUR_BOX', base_style='OPEN', wings=True,
+            parts_count=2, sprue=True, sprue_place='TOP', vent_count=0,
+            pour_channel=True, wing_keys='CONE', channel_hug=True))
+        bpy.context.view_layer.update()
+        halves_sp = [q for q in rsp_["parts"] if q.name.startswith("MF_Mold_")]
+        f_sp = pipe_faults(hug_seen["probe"], halves_sp, rsp_["positive"].location)
+    finally:
+        mfchan_h.bore_channel = real_bore_h
+    check(all(mfutil.part_is_valid(q)[0] for q in rsp_["parts"]) and not any(f_sp.values()),
+          f"Follow Model up a model that narrows to a point, under the top funnel: "
+          f"its mouth stands clear of the funnel and the pipe is whole "
+          f"(faults { {k_: v_[:4] for k_, v_ in f_sp.items() if v_} or 'none'})")
+
+    for smooth in (0.0, 0.5, 1.0):
+        f_ = sm_[smooth]["faults"]
+        lean_cap = math.tan(math.radians(mfchan_h.smooth_angle(smooth))) + 1e-6
+        check(not any(f_.values()) and _lean(sm_[smooth]["path"]) <= lean_cap,
+              f"Follow Model at Smoothing {smooth}, with a top funnel: the pipe is "
+              f"walled in all round, open from the mouth to the gate, its mouth clear "
+              f"of the funnel, and it only runs downhill (steepest lean "
+              f"{math.degrees(math.atan(_lean(sm_[smooth]['path']))):.0f} degrees; "
+              f"faults { {k_: v_[:4] for k_, v_ in f_.items() if v_} or 'none'})")
 
     # Wing alignment keys and the channel (user report): the channel's pipe runs up
     # one side of the clamp wing, and the keys were placed on it anyway - cones
