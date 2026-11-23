@@ -592,6 +592,30 @@ def _wing_key_solid(name, dims, center, ai, h, axis, hc, z, seam, grow, deeper, 
     return util.add_cone(name, c, r_tip, r_face, depth_out + embed, axis, coll)
 
 
+def _drop_slivers(obj, max_span=3.0):
+    """Delete the loose scraps a boolean can leave where a key's or tongue's face
+    grazes a piece's own (a few faces, a couple of millimetres across), keeping
+    everything bigger: the piece itself, and any real part of it."""
+    from . import meshprep
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    isl = meshprep._islands(bm)
+    if len(isl) > 1:
+        big = max(isl, key=len)
+        drop = set()
+        for faces in isl:
+            if faces is big:
+                continue
+            vs = {v for f in faces for v in f.verts}
+            if meshprep._span(list(vs)) < max_span:
+                drop |= vs
+        if drop:
+            bmesh.ops.delete(bm, geom=list(drop), context='VERTS')
+            bm.to_mesh(obj.data)
+            obj.data.update()
+    bm.free()
+
+
 def _seat_wing_key(keyed, mating, male, socket, coll):
     """Union ``male`` into ``keyed`` and cut ``socket`` from ``mating``, if the key
     really sits on ``keyed``'s lip and both pieces stay valid; otherwise roll both
@@ -607,6 +631,9 @@ def _seat_wing_key(keyed, mating, male, socket, coll):
         try:
             util.boolean(keyed, male, 'UNION')
             util.boolean(mating, socket, 'DIFFERENCE')
+            for obj in (keyed, mating):
+                if not util.part_is_valid(obj)[0]:
+                    _drop_slivers(obj)
             if not (util.part_is_valid(keyed)[0] and util.part_is_valid(mating)[0]):
                 raise RuntimeError("wing key would break a piece")
         except Exception:                     # roll back; a key never breaks a piece
@@ -762,7 +789,15 @@ def _groove_dims(props):
     """Tongue & Groove sizing, or None when the wing lip is too thin for one.
     Each piece keeps half the wing's thickness at the seam, so the groove (the
     tongue's height plus the clearance) never goes deeper than that lip less a
-    0.5 mm floor."""
+    0.5 mm floor.
+
+    The cross-sections come back as half profiles ``[(x, h), ...]``: x is the
+    distance from the tongue's middle line in the wing face, h the height out of
+    the mating face (below 0 is buried in the keyed piece, so it fuses). Tapered
+    (the default) has 45 degree flanks up to a narrow flat tip: it guides itself
+    in, prints without sagging whichever way the wing faces, and its groove is
+    the tongue grown by the clearance square to every face. Square is the plain
+    rectangle, the groove Fit Clearance wider each side and deeper."""
     thickness = max(getattr(props, "wing_thickness", 4.0), 2.0)
     clear = max(getattr(props, "fit_clearance", 0.2), 0.0)
     cap = thickness * 0.5 - clear - 0.5
@@ -770,9 +805,24 @@ def _groove_dims(props):
         return None
     want = getattr(props, "wing_groove_depth", 0.0)
     depth = min(want if want > 0.0 else 2.0, cap)
-    width = max(getattr(props, "wing_groove_width", 2.0), 0.6)
-    return types.SimpleNamespace(depth=depth, width=width, clear=clear,
-                                 gw=width + 2.0 * clear,
+    width = max(getattr(props, "wing_groove_width", 3.0), 0.6)
+    w = width * 0.5
+    shape = getattr(props, "wing_groove_shape", 'TAPER')
+    if shape == 'TAPER':
+        depth = min(depth, max(w - 0.2, 0.3))       # 45 degree flanks, a 0.4 mm tip
+        tip = max(w - depth, 0.05)
+        r2 = math.sqrt(2.0)
+        # one straight flank through the face (a corner lying in the face
+        # leaves slivers in the boolean): w wide where it leaves the face
+        tongue = [(w + 0.3, -0.3), (tip, depth)]
+        groove = [(w + clear * r2 + 0.05, -0.05), (tip + clear * (r2 - 1.0), depth + clear)]
+    else:
+        shape = 'SQUARE'
+        tongue = [(w, -0.3), (w, depth)]
+        groove = [(w + clear, -0.05), (w + clear, depth + clear)]
+    return types.SimpleNamespace(depth=depth, width=width, clear=clear, shape=shape,
+                                 tongue=tongue, groove=groove,
+                                 gw=2.0 * max(x for x, _h in groove),
                                  bolt_r=getattr(props, "bolt_radius", 1.5))
 
 
@@ -848,12 +898,11 @@ def _iso_lines(grid, us, zs, level):
     return lines
 
 
-def _ribbon(name, pts, nrms, half_w, a, b, point, n_mate, coll, closed=False,
-            extend=0.0):
+def _ribbon(name, pts, nrms, prof, point, n_mate, coll, closed=False, extend=0.0):
     """A solid strip along the polyline ``pts`` on the seam surface (points as
-    (u, z), mapped by ``point``): ``half_w`` either side of the line in the
-    surface (along ``nrms``), from ``a`` to ``b`` across it along ``n_mate``.
-    ``extend`` lengthens an open strip at both ends."""
+    (u, z), mapped by ``point``) with the cross-section ``prof`` (a half profile
+    of ``(x, h)``: x either side of the line in the surface, along ``nrms``; h
+    along ``n_mate``). ``extend`` lengthens an open strip at both ends."""
     pts = list(pts)
     nrms = list(nrms)
     if extend > 0.0 and not closed and len(pts) >= 2:
@@ -866,21 +915,54 @@ def _ribbon(name, pts, nrms, half_w, a, b, point, n_mate, coll, closed=False,
     bm = bmesh.new()
     rings = []
     for (u, z), (nu, nz) in zip(pts, nrms):
-        l = point(u + nu * half_w, z + nz * half_w)
-        r = point(u - nu * half_w, z - nz * half_w)
-        rings.append([bm.verts.new(l + n_mate * a), bm.verts.new(r + n_mate * a),
-                      bm.verts.new(r + n_mate * b), bm.verts.new(l + n_mate * b)])
+        ring = [bm.verts.new(point(u + nu * x, z + nz * x) + n_mate * h) for x, h in prof]
+        ring += [bm.verts.new(point(u - nu * x, z - nz * x) + n_mate * h)
+                 for x, h in reversed(prof)]
+        rings.append(ring)
     m = len(rings)
+    q = len(rings[0])
     for i in range(m if closed else m - 1):
         ra, rb = rings[i], rings[(i + 1) % m]
-        for k in range(4):
-            kn = (k + 1) % 4
+        for k in range(q):
+            kn = (k + 1) % q
             bm.faces.new((ra[k], ra[kn], rb[kn], rb[k]))
     if not closed:
         bm.faces.new(rings[0])
         bm.faces.new(list(reversed(rings[-1])))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     return util.new_mesh_object(name, bm, coll)
+
+
+def _joint(name, uv, prof, point, n_mate, coll, seg=24, grow=1.0, top=0.0):
+    """The profile ``prof`` turned round the point ``uv`` of the seam surface: the
+    elbow that joins two straight runs of a tongue (or its groove) at a sharp
+    turn, as round as the strips are wide, so the run is whole round a corner.
+    ``grow`` scales it across and ``top`` raises (or lowers) its top: a tongue's
+    elbow is a hair inside the strips and a groove's a hair outside, so no face
+    of an elbow lies in a strip's (the boolean leaves slivers where they do)."""
+    bm = bmesh.new()
+    rings = []
+    for i_, (x, h) in enumerate(prof):
+        r = x * grow
+        if i_ == len(prof) - 1:
+            h += top
+        rings.append([bm.verts.new(point(uv[0] + r * math.cos(2.0 * math.pi * i / seg),
+                                         uv[1] + r * math.sin(2.0 * math.pi * i / seg))
+                                   + n_mate * h) for i in range(seg)])
+    for ra, rb in zip(rings, rings[1:]):
+        for i in range(seg):
+            j = (i + 1) % seg
+            bm.faces.new((ra[i], ra[j], rb[j], rb[i]))
+    bm.faces.new(rings[0])
+    bm.faces.new(list(reversed(rings[-1])))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return util.new_mesh_object(name, bm, coll)
+
+
+def _detour_r(rad, dims):
+    """How far from the bottom-fill channel's centre line the tongue runs where
+    it goes round the pipe: clear of the pipe's wall with wing either side."""
+    return rad + dims.gw * 0.5 + 1.3
 
 
 def _groove_seam(keyed, mating, bvh, dims, point, n_mate, u_range, z_range, level,
@@ -892,9 +974,10 @@ def _groove_seam(keyed, mating, bvh, dims, point, n_mate, u_range, z_range, leve
     ``z_range``), it runs wherever the wing does - up the sides, over the top,
     round a cap. It is kept only where both pieces have wing on either side of
     the groove (so it stops where the wing stops: the base, a funnel, a bolt
-    hole) and clear of ``chan_axis`` (the bottom-fill channel's centre line,
-    with its radius); cut into runs at sharp turns, each run is seated on its
-    own. Returns how many runs were cut."""
+    hole). Where the bottom-fill channel (``chan_axis``: its centre line, with
+    its radius) runs in the wing, the tongue goes round the outside of its pipe.
+    Cut into straight pieces at sharp turns and joined there by elbows, each
+    seated on its own. Returns how many pieces were cut."""
     from . import build as _build
     dg = bpy.context.evaluated_depsgraph_get()
     step = 1.0
@@ -910,6 +993,27 @@ def _groove_seam(keyed, mating, bvh, dims, point, n_mate, u_range, z_range, leve
             hit = bvh.find_nearest(p) if p is not None else None
             col.append(hit[3] if hit and hit[0] is not None else None)
         grid.append(col)
+    if chan_axis:
+        # Where the bottom-fill pipe runs in the wing (Follow Model lays it
+        # along the wing's middle), the tongue goes round the outside of it:
+        # the line traced is the edge of the band round the model and the band
+        # round the pipe together.
+        import numpy as np
+        pts_ = [[point(u, z) for z in zs] for u in us]
+        flat = np.array([[c.x, c.y, c.z] if c is not None else [1e9] * 3
+                         for col_ in pts_ for c in col_])
+        best = np.full(len(flat), 1e18)
+        for a_, b_, rad in chan_axis:
+            a = np.array(a_[:]); ab = np.array(b_[:]) - a
+            f = np.clip(((flat - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)
+            dd = np.linalg.norm(flat - (a + f[:, None] * ab), axis=1)
+            best = np.minimum(best, dd - _detour_r(rad, dims) + level)
+        k = 0
+        for col in grid:
+            for j in range(len(col)):
+                if col[j] is not None:
+                    col[j] = min(col[j], float(best[k]))
+                k += 1
     lines = _iso_lines(grid, us, zs, level)
 
     reach = dims.gw * 0.5 + 1.0                    # wing kept round the groove
@@ -979,29 +1083,52 @@ def _groove_seam(keyed, mating, bvh, dims, point, n_mate, u_range, z_range, leve
         if len(cur) >= 3:
             runs.append(([line[i] for i in cur], [nrms[i] for i in cur], False))
 
-    # split at sharp turns: a strip folds over itself on the inside of one
-    pieces = []
+    # A strip folds over itself on the inside of a sharp turn, so a run is cut
+    # into straight pieces there (squared off at the cut, however short) and an
+    # elbow - the profile turned round the corner - joins them, so the tongue
+    # and its groove stay whole round the corner where a cap meets a stem.
+    pieces, joints = [], []
     for pts, nrms, closed in runs:
         cut_at = [k for k in range(1, len(pts) - 1)
                   if nrms[k - 1][0] * nrms[k + 1][0] + nrms[k - 1][1] * nrms[k + 1][1]
                   < math.cos(math.radians(35.0))]
         if not cut_at:
-            pieces.append((pts, nrms, closed))
+            if closed or sum(math.dist(p, q) for p, q in zip(pts, pts[1:])) >= 3.0:
+                pieces.append((pts, nrms, closed))
             continue
+
+        def seg_n(p, q):
+            tu, tz = q[0] - p[0], q[1] - p[1]
+            ln = math.hypot(tu, tz) or 1.0
+            return (-tz / ln, tu / ln)
         bounds = [0] + cut_at + [len(pts) - 1]
         for a_, b_ in zip(bounds, bounds[1:]):
-            if b_ - a_ >= 2:
-                pieces.append((pts[a_:b_ + 1], nrms[a_:b_ + 1], False))
+            if b_ <= a_:
+                continue
+            if (a_ in cut_at and b_ in cut_at
+                    and math.dist(pts[a_], pts[b_]) < dims.width * 0.5):
+                continue                  # two turns close together: their elbows meet
+            pp, nn = pts[a_:b_ + 1], list(nrms[a_:b_ + 1])
+            if a_ in cut_at:
+                nn[0] = seg_n(pp[0], pp[1])
+            if b_ in cut_at:
+                nn[-1] = seg_n(pp[-2], pp[-1])
+            pieces.append((pp, nn, False))
+        joints += [pts[k] for k in cut_at]
 
     done = 0
     for k, (pts, nrms, closed) in enumerate(pieces):
-        if sum(math.dist(p, q) for p, q in zip(pts, pts[1:])) < 3.0:
-            continue
-        tongue = _ribbon(f"{name}t{k}", pts, nrms, dims.width * 0.5, -0.3,
-                         dims.depth, point, n_mate, coll, closed)
-        groove = _ribbon(f"{name}g{k}", pts, nrms, dims.gw * 0.5, -0.05,
-                         dims.depth + dims.clear, point, n_mate, coll, closed,
-                         extend=dims.clear)
+        tongue = _ribbon(f"{name}t{k}", pts, nrms, dims.tongue, point, n_mate, coll,
+                         closed)
+        groove = _ribbon(f"{name}g{k}", pts, nrms, dims.groove, point, n_mate, coll,
+                         closed, extend=dims.clear)
+        if _seat_wing_key(keyed, mating, tongue, groove, coll):
+            done += 1
+    for k, uv in enumerate(joints):
+        tongue = _joint(f"{name}j{k}", uv, dims.tongue, point, n_mate, coll,
+                        grow=0.985, top=-0.03)
+        groove = _joint(f"{name}h{k}", uv, dims.groove, point, n_mate, coll,
+                        grow=1.0 / math.cos(math.pi / 24) + 0.02, top=0.03)
         if _seat_wing_key(keyed, mating, tongue, groove, coll):
             done += 1
     return done

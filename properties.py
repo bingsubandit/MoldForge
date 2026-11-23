@@ -518,9 +518,9 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
                             "are spread evenly at this distance (a tall mold gets a "
                             "whole row), dodging the bolt holes",
                             mn=5.0, soft=120.0)
-    wing_groove_width: _dist("Tongue Width", 2.0,
+    wing_groove_width: _dist("Tongue Width", 3.0,
                              "Width of the Tongue & Groove's tongue across the wing "
-                             "face; the groove is Fit Clearance wider on each side. "
+                             "face, at its foot; the groove is Fit Clearance wider. "
                              "The tongue runs up the middle of the wing, skipped where "
                              "the wing is too narrow for it",
                              mn=0.6, soft=6.0)
@@ -528,8 +528,23 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
                              "How far the tongue stands out of the wing face (the "
                              "groove is Fit Clearance deeper). 0 = automatic: as tall "
                              "as the wing lip allows, up to 2 mm; never so deep the "
-                             "groove pierces the mating wing",
+                             "groove pierces the mating wing. A tapered tongue is "
+                             "never taller than half its width",
                              mn=0.0, soft=4.0)
+    wing_groove_shape: EnumProperty(
+        name="Tongue Shape",
+        description="Cross-section of the Tongue & Groove",
+        items=[
+            ('TAPER', "Tapered",
+             "45 degree sides up to a narrow flat tip: guides itself into the "
+             "groove, prints cleanly whichever way the wing faces (no flat "
+             "overhang to sag), and a slightly off print still closes"),
+            ('SQUARE', "Square",
+             "Straight sides and a flat top: the tallest tongue for its width, "
+             "but the groove's roof is a flat overhang when the wing prints "
+             "upright, and it only goes in when the print is true to size"),
+        ],
+        default='TAPER')
     wing_band_notches: BoolProperty(
         name="Band Notches",
         description="Notches across the clamp wings' outer edges every 30 mm, for "

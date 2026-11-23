@@ -257,7 +257,18 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
         rows, edge_rows = [], []
         for (z, t), (_z, sh) in zip(path, shell):
             if wing is not None:
-                t_out = t + tube_out + wing.ext
+                # ext is measured square to the pipe, round its bends too: the
+                # edge is the outline of everything within tube_out + ext of
+                # the pipe's centre line, or the wing beside a leaning or bent
+                # pipe is too narrow for a key or a tongue
+                e_ = tube_out + wing.ext
+                t_out = t + e_
+                for (za, ta), (zb, tb) in zip(path, path[1:]):
+                    for f_ in (0.0, 0.25, 0.5, 0.75, 1.0):
+                        zj, tj = za + (zb - za) * f_, ta + (tb - ta) * f_
+                        dz_ = abs(zj - z)
+                        if dz_ < e_:
+                            t_out = max(t_out, tj + math.sqrt(e_ * e_ - dz_ * dz_))
                 r = _nearest(reach, z)
                 if r is not None:
                     t_out = max(t_out, r)

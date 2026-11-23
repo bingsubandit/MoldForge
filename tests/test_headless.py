@@ -2956,12 +2956,21 @@ def main():
     from moldforge.core import channel as mfchan_g
     real_seat_g = split._seat_wing_key
     real_bore_g = mfchan_g.bore_channel
-    for cfg_g in (dict(parts_count=2), dict(parts_count=3),
+    for cfg_g in (dict(parts_count=2, bolt_auto=False, bolt_count=0),
+                  dict(parts_count=3, bolt_auto=False, bolt_count=0),
                   dict(parts_count=2, pour_channel=True),
                   dict(parts_count=2, pour_channel=True, channel_hug=True),
-                  dict(parts_count=2, bolt_auto=True)):
-        seen_g = {"pairs": [], "verts": [], "holes": []}
+                  dict(parts_count=2, bolt_auto=True),
+                  dict(parts_count=2, bolt_auto=False, bolt_count=0,
+                       wing_groove_shape='SQUARE')):
+        seen_g = {"pairs": [], "verts": [], "holes": [], "solids": [], "dims": []}
         real_cone_g = mfutil.add_cone
+        real_dims_g = split._groove_dims
+
+        def _spy_dims_g(props_):
+            d_ = real_dims_g(props_)
+            seen_g["dims"].append(d_)
+            return d_
 
         def _spy_cone_g(name, center, r1, r2, depth, axis, coll, **kw):
             if name == "MF_wbolt":
@@ -2973,9 +2982,12 @@ def main():
                 seen_g["verts"] += [male.matrix_world @ v.co for v in male.data.vertices]
                 t_ = mfutil.duplicate_object(male, "MF_gtest_t", coll)
                 g_ = mfutil.duplicate_object(socket, "MF_gtest_g", coll)
+                solid_ = (keyed.name, [male.matrix_world @ v.co for v in male.data.vertices],
+                          [tuple(f_.vertices) for f_ in male.data.polygons])
                 ok_ = real_seat_g(keyed, mating, male, socket, coll)
                 if ok_:
                     seen_g["pairs"].append((keyed.name, mating.name, t_, g_))
+                    seen_g["solids"].append(solid_)
                 else:
                     mfutil.remove_object(t_)
                     mfutil.remove_object(g_)
@@ -2984,8 +2996,10 @@ def main():
 
         def _spy_bore_g(mold, geo, coll):
             seen_g["probe"] = pipe_probe(geo)
+            seen_g["geo"] = geo
             return real_bore_g(mold, geo, coll)
         split._seat_wing_key = _spy_seat_g
+        split._groove_dims = _spy_dims_g
         mfchan_g.bore_channel = _spy_bore_g
         mfutil.add_cone = _spy_cone_g
         try:
@@ -2996,6 +3010,7 @@ def main():
             bpy.context.view_layer.update()
         finally:
             split._seat_wing_key = real_seat_g
+            split._groove_dims = real_dims_g
             mfchan_g.bore_channel = real_bore_g
             mfutil.add_cone = real_cone_g
         n_g = cfg_g["parts_count"]
@@ -3043,8 +3058,27 @@ def main():
         bmg.transform(rg_["positive"].matrix_world)
         bvh_g = BVHTree.FromBMesh(bmg)
         bmg.free()
-        dist_g = [bvh_g.find_nearest(v + home_g)[3] for v in seen_g["verts"]]
-        hw_g = getattr(pd_, "wing_groove_width", 2.0) * 0.5 + 0.6
+        dims_g = next(d_ for d_ in seen_g["dims"] if d_ is not None)
+        hw_g = dims_g.width * 0.5 + 0.6
+        # Round the bottom-fill pipe the tongue runs outside it instead: the
+        # band round its centre line counts as the wing's middle there.
+        chan_g = split._chan_axis(seen_g["geo"]) if "geo" in seen_g else []
+
+        def _chan_off(v):
+            best = None
+            for a_, b_, rad_ in chan_g:
+                ab = b_ - a_
+                f_ = max(0.0, min(1.0, (v - a_).dot(ab) / max(ab.length_squared, 1e-12)))
+                e_ = (v - (a_ + ab * f_)).length - split._detour_r(rad_, dims_g)
+                best = e_ if best is None or abs(e_) < abs(best) else best
+            return best
+        dist_g = []
+        for v in seen_g["verts"]:
+            d_ = bvh_g.find_nearest(v + home_g)[3]
+            c_ = _chan_off(v) if chan_g else None
+            if c_ is not None and abs(c_) < abs(d_ - mid_g):
+                d_ = mid_g + c_                  # measured from the pipe's band
+            dist_g.append(d_)
         pz0 = mfutil.world_bbox(rg_["positive"])[0].z - home_g.z
         pz1 = mfutil.world_bbox(rg_["positive"])[1].z - home_g.z
         vz = [v.z for v in seen_g["verts"]] or [0.0]
@@ -3052,6 +3086,53 @@ def main():
               f"... every point of the tongue sits across the wing's middle "
               f"({min(dist_g or [0]):.1f} to {max(dist_g or [0]):.1f} mm from the model, "
               f"the wing's middle is {mid_g:.1f})")
+        # User report: the tongue broke where the cap meets the stem - a
+        # sharp turn split it into pieces that didn't meet. The pieces seated
+        # on each piece must now touch end to end: one tongue per side of a
+        # 2-piece seam (one per radial seam) when nothing interrupts it.
+        if not seen_g["holes"] and not cfg_g.get("pour_channel"):
+            from mathutils.bvhtree import BVHTree as _BT
+            comps_g = 0
+            per_g = {}
+            for kn_ in {k_ for k_, _v, _f in seen_g["solids"]}:
+                trees_ = [_BT.FromPolygons(v_, f_) for k_, v_, f_ in seen_g["solids"]
+                          if k_ == kn_]
+                par_ = list(range(len(trees_)))
+
+                def _root(i_):
+                    while par_[i_] != i_:
+                        i_ = par_[i_]
+                    return i_
+                for i_ in range(len(trees_)):
+                    for j_ in range(i_ + 1, len(trees_)):
+                        if trees_[i_].overlap(trees_[j_]):
+                            par_[_root(i_)] = _root(j_)
+                per_g[kn_] = len({_root(i_) for i_ in range(len(trees_))})
+                comps_g += per_g[kn_]
+            want_g = 2 if n_g == 2 else n_g
+            check(comps_g == want_g,
+                  f"... whole round every corner (the cap's overhang): {comps_g} "
+                  f"separate tongues, {want_g} expected {per_g}")
+        if cfg_g.get("channel_hug") and "geo" in seen_g:
+            # User report: with the bottom fill on, the channel side had no
+            # tongue at all - it was kept off the pipe, which Follow Model lays
+            # along the wing. It now runs round the outside of the pipe, the
+            # wing widened to carry it, all the way up.
+            geo_g = seen_g["geo"]
+            z_lo = geo_g["gate_z"] + 2.0 * geo_g["tube_out"] + 3.0
+            z_hi = geo_g["throat"] - 6.0
+            near_ = [v for v in seen_g["verts"] if abs(_chan_off(v)) <= hw_g]
+            zs_g = [z_lo + i_ * 2.0 for i_ in range(int((z_hi - z_lo) / 2.0) + 1)]
+            # (a bolt hole through the wing beside the pipe stops it, as anywhere)
+            zs_g = [z_ for z_ in zs_g
+                    if all(abs(z_ - c_.z) > r_ + dims_g.gw * 0.5 + 2.0
+                           for c_, r_, _a in seen_g["holes"])]
+            cov_g = [any(abs(v.z - z_) <= 2.0 for v in near_) for z_ in zs_g]
+            check(zs_g and sum(cov_g) >= 0.9 * len(zs_g),
+                  f"... and on the channel side it runs round the outside of the "
+                  f"pipe ({sum(cov_g)} of {len(zs_g)} heights along the pipe; none at "
+                  f"{[round(z_) for z_, c_ in zip(zs_g, cov_g) if not c_]}, pipe "
+                  f"{z_lo:.0f} to {z_hi:.0f})")
         check(min(vz) <= pz0 + 1.5 and max(vz) >= pz1 + off_g - 2.0,
               f"... and runs the wing's full height, from the base to above the "
               f"model's top (tongue {min(vz):.1f} to {max(vz):.1f}, model "
@@ -3071,6 +3152,19 @@ def main():
               f"... the tongue is part of one piece and its groove is cut out of the "
               f"other (tongue in its piece {min(seated or [0]):.0%}, groove left in the "
               f"other {max(cut or [1]):.0%})")
+        # Tapered by default: 45 degree flanks to a narrow tip; the groove is the
+        # tongue grown by the clearance square to every face.
+        tw_ = {x_ for x_, h_ in dims_g.tongue if h_ >= dims_g.depth - 1e-6}
+        if cfg_g.get("wing_groove_shape") == 'SQUARE':
+            check(dims_g.shape == 'SQUARE' and max(tw_) == dims_g.width * 0.5,
+                  f"... Square: straight sides ({dims_g.tongue})")
+        else:
+            gt_ = dims_g.groove[-1]
+            check(dims_g.shape == 'TAPER' and max(tw_) < dims_g.width * 0.5 - 0.5
+                  and abs((dims_g.width * 0.5 - max(tw_)) - dims_g.depth) < 1e-6
+                  and gt_[1] == dims_g.depth + dims_g.clear and gt_[0] > max(tw_),
+                  f"... Tapered: 45 degree sides to a {2 * max(tw_):.1f} mm tip, the "
+                  f"groove clear of it all round ({dims_g.tongue} in {dims_g.groove})")
         if cfg_g.get("pour_channel"):
             check(not any(faults_g.values()),
                   f"... and the channel's pipe is still whole round it "

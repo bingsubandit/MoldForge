@@ -767,6 +767,7 @@ class MOLDFORGE_PT_wings(_MFSub, bpy.types.Panel):
         layout.prop(props, "wing_keys", text="Alignment")
         if props.wing_keys == 'GROOVE':
             col = layout.column(align=True)
+            col.prop(props, "wing_groove_shape", text="Shape")
             col.prop(props, "wing_groove_width", text="Tongue width")
             col.prop(props, "wing_groove_depth", text="Tongue height")
             layout.prop(props, "fit_clearance", text="Clearance")
