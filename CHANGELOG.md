@@ -2,7 +2,11 @@
 
 All notable changes. Versions are the add-on `version` in `blender_manifest.toml`.
 
-## Unreleased
+## 0.47.0 — fork release: model clean-up, a channel that follows the model, tongue & groove wings
+
+The first release of this fork (github.com/bingsubandit/MoldForge), on top of
+upstream 0.46.9.
+
 
 - **New: Tongue & Groove wing alignment.** A new Wing Alignment choice: instead
   of keys, a continuous tongue runs up the middle of one piece's wing face and
