@@ -4,6 +4,8 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+## 0.47.1 — Tongue & Groove follows the wing
+
 - **Fixed: the Tongue & Groove didn't follow the wing.** It was placed
   height by height, halfway between the model's side and the wing's edge as
   measured straight across, so on a slope, a cap or a flare it wandered off
