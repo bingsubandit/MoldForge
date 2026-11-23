@@ -4,6 +4,8 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+## 0.47.2 — Tongue & Groove round corners and the channel, a tidier bottom-fill mouth
+
 - **Fixed: the Tongue & Groove broke at sharp corners**, such as where a
   mushroom's cap meets its stem. A sharp turn cut it into pieces that only met
   at a point, and a very short piece between two close turns was dropped.
