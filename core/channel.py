@@ -21,6 +21,7 @@ import bmesh
 from mathutils import Vector
 
 from . import util
+from . import constants as C
 
 
 def seam_frame(mold, axis, props, parting=None, radial_center=None, flip=False):
@@ -181,7 +182,7 @@ def _sheet(name, frame, rows, thick, coll):
 
 
 def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=False,
-                  hug=False, wing=None, keep_out=()):
+                  hug=False, wing=None, keep_out=(), top_apex=None):
     """Weld the channel's pipe, fin and mouth onto the still-solid ``mold``
     (before the cavity is carved). ``floor_z`` is the lowest height the gate may
     open into the cavity (the cavity floor, a key plate's rim, a Locking Base's
@@ -195,9 +196,16 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
     one: its channel side is then rebuilt at full thickness out to ``ext``
     beyond the pipe, so it can still be clamped (and keyed) over the pipe, and
     its bolt holes there are drilled again outboard of the pipe. ``keep_out``
-    lists the top pour funnels as ``(x, y, radius)``: a Follow Model pipe that
-    tops out near the middle of the model is moved out until its mouth stands
-    clear of them.
+    lists the top pour funnels as ``(x, y, radius)``: the pipe (or, with Follow
+    Model, its top) is moved out along the seam until its mouth's rim stands
+    clear of all of them, wherever they are. ``top_apex`` is the height of the
+    top funnels' rims, which the mouth's matches.
+
+    The mouth is sized like a top funnel: the channel's radius times Flare,
+    held on the mold as the top funnel's is (Oversized Mouth lifts that), as
+    tall as Funnel Height; with a wing, the wing runs on up both sides of it
+    to its rim, as it does up a top funnel - beside a top funnel the two
+    wings fuse into one.
 
     Returns the geometry the bore phase needs, or ``(None, reason)``."""
     mn, mx = util.world_bbox(mold)
@@ -235,8 +243,12 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
     shell_top = max((z for z, r in reach if r is not None), default=top)
     throat = max(top + 3.0, shell_top + 1.5)
     fh = max(getattr(props, "funnel_height", 12.0), 1.0)
-    apex = throat + max(fh * 0.6, 6.0)
-    mouth_r = max(bore_r * 1.8, bore_r + 3.0)
+    apex = max(throat + max(fh, 2.0) if top_apex is None else top_apex,
+               throat + max(fh * 0.5, 2.0))
+    mouth_r = bore_r * max(getattr(props, "sprue_flare", 2.4), 1.0)
+    if not getattr(props, "big_mouth", False):
+        mouth_r = min(mouth_r, C.MOUTH_CAP * max(min(mx.x - mn.x, mx.y - mn.y) * 0.5, 1e-4))
+    mouth_r = max(mouth_r, bore_r + 1.0)
     fin_t = max(2.0 * wall, 3.0)
 
     path = edge_rows = None
@@ -279,6 +291,8 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
         fin = _sheet("MF_chanfin", frame, rows,
                      wing.thickness if wing is not None else fin_t, coll)
     else:
+        # Clear of the top funnels: the whole straight pipe moves out.
+        t_pipe = _clear_of(frame, t_pipe, throat, mouth_r + wall, keep_out, far)
         # Pipe along the seam, from under the gate to the throat.
         steps = max(int((throat - z0) / 4.0), 2)
         pipe_pts = [frame.point(t_pipe, z0 + (throat - z0) * i / steps)
@@ -301,6 +315,16 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
     tp = frame.point(t_top, throat)
     cup = util.add_cone("MF_chancup", Vector((tp.x, tp.y, (throat + apex) * 0.5)),
                         tube_out, mouth_r + wall, apex - throat, 'Z', coll, segments=48)
+    cup_wing = None
+    if wing is not None:
+        # The wing on up both sides of the cup to its rim, as up a top funnel.
+        rows_c = []
+        for i in range(9):
+            z = throat - 1.0 + (apex - throat + 1.0) * i / 8
+            f_ = max(0.0, min(1.0, (z - throat) / max(apex - throat, 1e-6)))
+            r_ = tube_out + (mouth_r + wall - tube_out) * f_ + wing.ext
+            rows_c.append((z, t_top - r_, t_top + r_))
+        cup_wing = _sheet("MF_chancupwing", frame, rows_c, wing.thickness, coll)
     # Collar: the gate runs from the pipe to the cavity through the fin, which
     # is thinner than the gate - without a tube round it the gate would cut
     # through the fin's faces and leak out sideways.
@@ -310,7 +334,7 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
     collar = _sweep("MF_chancollar", collar_pts, tube_out, coll)
     elbow = util.add_sphere("MF_chancollar", frame.point(t_pipe, gate_z), tube_out, coll,
                             subdiv=3)
-    for part in (pipe, fin, cup, collar, elbow):
+    for part in (pipe, fin, cup, cup_wing, collar, elbow):
         if part is not None:
             util.boolean(mold, part, 'UNION')
             util.remove_object(part)
@@ -319,7 +343,8 @@ def build_channel(mold, cavity, model, props, frame, floor_z, coll, open_below=F
            "mouth_r": mouth_r, "open_below": open_below, "floor_z": floor_z,
            "cup": (tp.x, tp.y, mouth_r + wall), "reach": reach,
            "tube_out": tube_out, "hug": bool(hug), "path": path,
-           "edge_rows": edge_rows, "bolts_redrilled": 0}
+           "edge_rows": edge_rows, "bolts_redrilled": 0,
+           "cup_wing": wing.ext if cup_wing is not None else None}
     if hug and wing is not None and wing.bolt_zs:
         geo["bolts_redrilled"] = _redrill_bolts(mold, geo, wing, coll)
     return geo, ""

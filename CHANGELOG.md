@@ -4,6 +4,37 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+- **Fixed: the Tongue & Groove broke at sharp corners**, such as where a
+  mushroom's cap meets its stem. A sharp turn cut it into pieces that only met
+  at a point, and a very short piece between two close turns was dropped.
+  The pieces are now joined by an elbow, the tongue's shape turned round the
+  corner, so the tongue and its groove are whole round every corner.
+- **New: Tongue & Groove Shape, Tapered by default.** 45 degree sides up to a
+  narrow flat tip: it guides itself into the groove, prints cleanly whichever
+  way the wing faces (a square groove's flat roof sags when the wing prints
+  upright), and a slightly off print still closes. `Square` keeps the old
+  straight-sided tongue. Tongue Width now defaults to 3 mm, so the tapered
+  tongue has room for its full height.
+- **Fixed: no Tongue & Groove beside a Follow Model bottom-fill pipe.** The
+  pipe lies along the wing's middle there, so the tongue was dropped for the
+  whole length of the pipe. It now runs round the outside of the pipe. The
+  wing over the pipe is widened where the pipe leans or bends, so there is
+  room for the tongue (and for keys) all the way up.
+- **Fixed: the bottom-fill mouth could overlap a big top funnel.** A straight
+  channel never checked for one. Now, in both channel modes, the mouth moves
+  out along the seam until its rim stands clear of every top funnel's rim,
+  centred or not.
+- **Changed: the bottom-fill mouth follows the funnel settings.** Its mouth is
+  the channel radius times Flare, kept on the mold as the top funnel's is
+  (Oversized Mouth lifts that), and its rim is level with the top funnel's
+  (or Funnel Height above the mold, with no top funnel).
+- **New: the wing runs up the bottom-fill mouth**, on both sides to its rim,
+  as it does up a top funnel. Beside the top funnel, the two wings fuse into
+  one.
+- Booleans that leave a loose scrap a couple of millimetres across, where a
+  key or tongue grazes a piece's face, no longer cost that key or tongue: the
+  scrap is removed before the piece is checked.
+
 ## 0.47.1 — Tongue & Groove follows the wing
 
 - **Fixed: the Tongue & Groove didn't follow the wing.** It was placed

@@ -2832,6 +2832,85 @@ def main():
               f"{math.degrees(math.atan(_lean(sm_[smooth]['path']))):.0f} degrees; "
               f"faults { {k_: v_[:4] for k_, v_ in f_.items() if v_} or 'none'})")
 
+    # Bottom-fill mouth and the top funnel (user report): with a big top funnel
+    # the two mouths could overlap (a straight channel never checked; the
+    # bottom cup had its own fixed size and height and no wing). The bottom
+    # mouth is now sized from the funnel settings (channel radius x Flare,
+    # Oversized Mouth honoured), its rim level with the top funnel's, moved
+    # out until it stands clear of every top funnel - centred or not - and the
+    # wing runs on up both sides of it to the rim.
+    print("\n=== Bottom-fill mouth stands clear of the top funnel ===")
+    from moldforge.core import channel as mfchan_m, sprue as mfsprue_m, build as mfbuild_m
+    real_bore_m, real_spouts_m = mfchan_m.bore_channel, mfsprue_m.add_funnel_spouts
+    for hug_m in (False, True):
+        for place_m in ({}, dict(sprue_place='MANUAL', sprue_x=8.0, sprue_y=6.0)):
+            seen_m = {}
+
+            def _spy_spouts_m(*a, **k):
+                seen_m["funnels"] = real_spouts_m(*a, **k)
+                return seen_m["funnels"]
+
+            def _spy_bore_m(mold, geo, coll):
+                seen_m["geo"] = geo
+                seen_m["probe"] = pipe_probe(geo)
+                # the wing up the cup: solid beside the cup on both sides, at
+                # mid-height and just under the rim (before anything is bored)
+                fr_ = geo["frame"]
+                t_top = mfchan_m.axis_at(geo, geo["throat"])
+                dg_ = bpy.context.evaluated_depsgraph_get()
+                out_ = []
+                if geo.get("cup_wing"):
+                    for zf_ in (0.5, 0.9):
+                        z_ = geo["throat"] + (geo["apex"] - geo["throat"]) * zf_
+                        r_ = (geo["tube_out"] + (geo["mouth_r"] + geo["tube_out"]
+                                                 - geo["bore_r"] - geo["tube_out"]) * zf_)
+                        for sgn_ in (-1.0, 1.0):
+                            q_ = fr_.point(t_top + sgn_ * (r_ + geo["cup_wing"] * 0.6), z_)
+                            out_.append(mfbuild_m._inside_solid(mold, q_, dg_))
+                seen_m["wing"] = out_
+                return real_bore_m(mold, geo, coll)
+            mfchan_m.bore_channel = _spy_bore_m
+            mfsprue_m.add_funnel_spouts = _spy_spouts_m
+            try:
+                reset_scene()
+                pm_ = _over(default_props(), box_style='POUR_BOX', base_style='OPEN',
+                            wings=True, sprue=True, vent_count=0, pour_channel=True,
+                            channel_hug=hug_m, parts_count=2, sprue_radius=8.0,
+                            sprue_flare=5.0, big_mouth=True, **place_m)
+                rm_ = pipeline.build_mold_system(make_bell_master("Bell"), pm_)
+            finally:
+                mfchan_m.bore_channel = real_bore_m
+                mfsprue_m.add_funnel_spouts = real_spouts_m
+            tag_m = f"{'Follow Model' if hug_m else 'straight'}, " \
+                    f"{'off-centre' if place_m else 'centred'} funnel"
+            geo_m = seen_m.get("geo")
+            if geo_m is None:
+                check(False, f"bottom fill beside a big top funnel ({tag_m}): the "
+                             f"channel was built ({rm_.get('channel_note')})")
+                continue
+            cx_, cy_, cr_ = geo_m["cup"]
+            gaps_m = [math.hypot(cx_ - f_["x"], cy_ - f_["y"]) - cr_ - f_["mouth_out"]
+                      for f_ in seen_m["funnels"]]
+            check(seen_m["funnels"] and min(gaps_m) >= 1.0
+                  and all(mfutil.part_is_valid(q)[0] for q in rm_["parts"]),
+                  f"bottom fill beside a big top funnel ({tag_m}): the two mouths stand "
+                  f"apart ({min(gaps_m or [0]):.1f} mm between their rims)")
+            check(abs(geo_m["mouth_r"] - geo_m["bore_r"] * 5.0) < 1e-6
+                  and abs(geo_m["apex"] - max(f_["apex_z"] for f_ in seen_m["funnels"]))
+                  < 1e-6,
+                  f"... the bottom mouth is sized by the funnel settings (radius "
+                  f"{geo_m['mouth_r']:.1f} = {geo_m['bore_r']:.1f} x Flare 5), its rim level "
+                  f"with the top funnel's ({geo_m['apex']:.1f})")
+            check(len(seen_m["wing"]) == 4 and all(seen_m["wing"]),
+                  f"... and the wing runs up both sides of it to the rim "
+                  f"({seen_m['wing']})")
+            f_m = pipe_faults(seen_m["probe"],
+                              [q for q in rm_["parts"] if q.name.startswith("MF_Mold_")],
+                              rm_["positive"].location)
+            check(not any(f_m.values()),
+                  f"... and its pipe is whole and open "
+                  f"({ {k_: v_[:4] for k_, v_ in f_m.items() if v_} or 'no faults'})")
+
     # Wing alignment keys and the channel (user report): the channel's pipe runs up
     # one side of the clamp wing, and the keys were placed on it anyway - cones
     # standing on the pipe. A key must never overlap the pipe; the other side of

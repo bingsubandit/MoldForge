@@ -620,7 +620,8 @@ def _build_once(master, props, trim_ok=False):
                     mold, cavity_cutter, shape_ref, p, frame, floor_z, coll,
                     open_below=open_below, hug=getattr(p, "channel_hug", False),
                     wing=_channel_wing(p, axis, multipart, wing_bolt_zs),
-                    keep_out=[(f["x"], f["y"], f["mouth_out"]) for f in funnels])
+                    keep_out=[(f["x"], f["y"], f["mouth_out"]) for f in funnels],
+                    top_apex=max((f["apex_z"] for f in funnels), default=None))
             except Exception as exc:                  # never fails the mold
                 chan, chan_note = None, f"the bottom-fill channel failed ({exc})"
                 for o in list(coll.objects):
