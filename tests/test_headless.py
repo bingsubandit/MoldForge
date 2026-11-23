@@ -2960,10 +2960,17 @@ def main():
                   dict(parts_count=2, pour_channel=True),
                   dict(parts_count=2, pour_channel=True, channel_hug=True),
                   dict(parts_count=2, bolt_auto=True)):
-        seen_g = {"pairs": []}
+        seen_g = {"pairs": [], "verts": [], "holes": []}
+        real_cone_g = mfutil.add_cone
+
+        def _spy_cone_g(name, center, r1, r2, depth, axis, coll, **kw):
+            if name == "MF_wbolt":
+                seen_g["holes"].append((Vector(center), r1, axis))
+            return real_cone_g(name, center, r1, r2, depth, axis, coll, **kw)
 
         def _spy_seat_g(keyed, mating, male, socket, coll):
             if male.name.startswith(("MF_wgr", "MF_rwgr")):
+                seen_g["verts"] += [male.matrix_world @ v.co for v in male.data.vertices]
                 t_ = mfutil.duplicate_object(male, "MF_gtest_t", coll)
                 g_ = mfutil.duplicate_object(socket, "MF_gtest_g", coll)
                 ok_ = real_seat_g(keyed, mating, male, socket, coll)
@@ -2980,6 +2987,7 @@ def main():
             return real_bore_g(mold, geo, coll)
         split._seat_wing_key = _spy_seat_g
         mfchan_g.bore_channel = _spy_bore_g
+        mfutil.add_cone = _spy_cone_g
         try:
             reset_scene()
             rg_ = pipeline.build_mold_system(make_bell_master("Bell"), _over(
@@ -2989,6 +2997,7 @@ def main():
         finally:
             split._seat_wing_key = real_seat_g
             mfchan_g.bore_channel = real_bore_g
+            mfutil.add_cone = real_cone_g
         n_g = cfg_g["parts_count"]
         home_g = rg_["positive"].location
         by_name = {q.name: q for q in rg_["parts"]}
@@ -3015,16 +3024,53 @@ def main():
                                 [q for q in rg_["parts"] if q.name.startswith("MF_Mold_")],
                                 home_g) if "probe" in seen_g else {})
         check(all(mfutil.part_is_valid(q)[0] for q in rg_["parts"])
-              and rg_.get("wing_grooves") == n_g and len(seen_g["pairs"]) == n_g
+              and (rg_.get("wing_grooves") or 0) >= n_g
+              and len(seen_g["pairs"]) == rg_.get("wing_grooves")
               and not rg_.get("wing_keys"),
-              f"Tongue & Groove {cfg_g}: one up every side of the wing "
-              f"({rg_.get('wing_grooves')} of {n_g}), no keys, valid parts")
-        check(seated and min(seated) > 0.95 and max(cut) < 0.05
-              and min(tall) > mh_ * 0.4,
+              f"Tongue & Groove {cfg_g}: tongues along every seam's wing "
+              f"({rg_.get('wing_grooves')} runs, {n_g} seams), no keys, valid parts")
+        # User report: the tongue stopped short of the wing's top and bottom and
+        # wandered off the wing's middle on a sloped or curved part. The wing
+        # is the band offset .. offset + width from the model: every point of
+        # the tongue must sit across its middle line, and the tongue must run
+        # from the base up to where the wing ends above the model.
+        pd_ = default_props()
+        off_g = pd_.wall_thickness + pd_.shell_wall
+        mid_g = off_g + pd_.wing_width * 0.5
+        from mathutils.bvhtree import BVHTree
+        bmg = bmesh.new()
+        bmg.from_mesh(rg_["positive"].data)
+        bmg.transform(rg_["positive"].matrix_world)
+        bvh_g = BVHTree.FromBMesh(bmg)
+        bmg.free()
+        dist_g = [bvh_g.find_nearest(v + home_g)[3] for v in seen_g["verts"]]
+        hw_g = getattr(pd_, "wing_groove_width", 2.0) * 0.5 + 0.6
+        pz0 = mfutil.world_bbox(rg_["positive"])[0].z - home_g.z
+        pz1 = mfutil.world_bbox(rg_["positive"])[1].z - home_g.z
+        vz = [v.z for v in seen_g["verts"]] or [0.0]
+        check(dist_g and mid_g - hw_g <= min(dist_g) and max(dist_g) <= mid_g + hw_g,
+              f"... every point of the tongue sits across the wing's middle "
+              f"({min(dist_g or [0]):.1f} to {max(dist_g or [0]):.1f} mm from the model, "
+              f"the wing's middle is {mid_g:.1f})")
+        check(min(vz) <= pz0 + 1.5 and max(vz) >= pz1 + off_g - 2.0,
+              f"... and runs the wing's full height, from the base to above the "
+              f"model's top (tongue {min(vz):.1f} to {max(vz):.1f}, model "
+              f"{pz0:.1f} to {pz1:.1f}, the wing ends about {pz1 + off_g:.1f})")
+        if seen_g["holes"]:
+            crossed = 0
+            for c_, r_, ax_ in seen_g["holes"]:
+                a_ = {'X': 0, 'Y': 1, 'Z': 2}[ax_]
+                for v in seen_g["verts"]:
+                    dv = v - c_
+                    dv[a_] = 0.0
+                    if dv.length < r_ + 0.3:
+                        crossed += 1
+            check(crossed == 0, f"... and clear of all {len(seen_g['holes'])} bolt holes "
+                                f"({crossed} tongue points in one)")
+        check(seated and min(seated) > 0.95 and max(cut) < 0.05,
               f"... the tongue is part of one piece and its groove is cut out of the "
-              f"other, running up the wing (tongue in its piece "
-              f"{min(seated or [0]):.0%}, groove left in the other {max(cut or [1]):.0%}, "
-              f"shortest run {min(tall or [0]):.0f} mm)")
+              f"other (tongue in its piece {min(seated or [0]):.0%}, groove left in the "
+              f"other {max(cut or [1]):.0%})")
         if cfg_g.get("pour_channel"):
             check(not any(faults_g.values()),
                   f"... and the channel's pipe is still whole round it "

@@ -2,6 +2,17 @@
 
 All notable changes. Versions are the add-on `version` in `blender_manifest.toml`.
 
+## Unreleased
+
+- **Fixed: the Tongue & Groove didn't follow the wing.** It was placed
+  height by height, halfway between the model's side and the wing's edge as
+  measured straight across, so on a slope, a cap or a flare it wandered off
+  the wing's middle, stepped every 2 mm, and stopped 1 mm inside the model's
+  height. It is now traced along the wing's own middle line (the distance
+  from the model the wing is built at), so it curves with the wing and runs
+  its whole length, from the base to where the wing ends above the model,
+  stopping only where the wing does (a funnel, a bolt hole, the channel).
+
 ## 0.47.0 — fork release: model clean-up, a channel that follows the model, tongue & groove wings
 
 The first release of this fork (github.com/bingsubandit/MoldForge), on top of

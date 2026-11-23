@@ -776,89 +776,264 @@ def _groove_dims(props):
                                  bolt_r=getattr(props, "bolt_radius", 1.5))
 
 
-def _groove_side(keyed, mating, master, dims, point, d, n_mate, origin, z_lo, z_hi,
-                 offset, bolt_zs, chan, chan_shift, coll, name):
-    """Tongue & Groove up one side of a seam's wing. ``point(t, z)`` is the seam
-    surface ``t`` out along ``d`` from ``origin`` at height z; ``n_mate`` points
-    from ``keyed`` into ``mating``. At every 2 mm of height the wing runs from
-    the case's outside (the model's reach on the seam plus ``offset``) to its
-    edge (``keyed``'s outermost point there); the tongue runs up the middle of
-    that span, skipped where it is too narrow, round bolt holes and round the
-    bottom-fill channel ``chan`` (its pipe, its gate). Returns True if cut."""
+def _model_bvh(master):
+    """A BVH of ``master`` in world space, for distances to the model."""
+    from mathutils.bvhtree import BVHTree
+    bm = bmesh.new()
+    bm.from_mesh(master.data)
+    bm.transform(master.matrix_world)
+    tree = BVHTree.FromBMesh(bm)
+    bm.free()
+    return tree
+
+
+def _iso_lines(grid, us, zs, level):
+    """Marching squares: the polylines (lists of (u, z)) where the sampled
+    field ``grid[i][j]`` (at ``us[i]``, ``zs[j]``; None = unknown) crosses
+    ``level``. Closed loops come back with their first point repeated."""
+    def lerp(a, b, fa, fb):
+        f = (level - fa) / (fb - fa)
+        return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
+    segs = []
+    for i in range(len(us) - 1):
+        for j in range(len(zs) - 1):
+            c = [((i, j), (us[i], zs[j])), ((i + 1, j), (us[i + 1], zs[j])),
+                 ((i + 1, j + 1), (us[i + 1], zs[j + 1])), ((i, j + 1), (us[i], zs[j + 1]))]
+            v = [grid[a][b] for (a, b), _p in c]
+            if any(x is None for x in v):
+                continue
+            cross = []
+            for k in range(4):
+                (ka, pa), (kb, pb) = c[k], c[(k + 1) % 4]
+                fa, fb = v[k], v[(k + 1) % 4]
+                if (fa < level) != (fb < level):
+                    key = tuple(sorted((ka, kb)))
+                    cross.append((key, lerp(pa, pb, fa, fb)))
+            if len(cross) == 2:
+                segs.append(cross)
+            elif len(cross) == 4:                 # a saddle: pair by the centre value
+                mid = sum(v) * 0.25
+                if (mid < level) == (v[0] < level):
+                    segs += [[cross[0], cross[3]], [cross[1], cross[2]]]
+                else:
+                    segs += [[cross[0], cross[1]], [cross[2], cross[3]]]
+    # chain the segments end to end through their shared grid edges
+    ends = {}
+    for k, ((ea, _pa), (eb, _pb)) in enumerate(segs):
+        ends.setdefault(ea, []).append(k)
+        ends.setdefault(eb, []).append(k)
+    used = [False] * len(segs)
+    lines = []
+    for k0 in range(len(segs)):
+        if used[k0]:
+            continue
+        used[k0] = True
+        (ea, pa), (eb, pb) = segs[k0]
+        line = [(ea, pa), (eb, pb)]
+        for forward in (True, False):
+            while True:
+                tip_key = line[-1][0] if forward else line[0][0]
+                nxt = [k for k in ends.get(tip_key, ()) if not used[k]]
+                if not nxt:
+                    break
+                k = nxt[0]
+                used[k] = True
+                (xa, qa), (xb, qb) = segs[k]
+                far = (xb, qb) if xa == tip_key else (xa, qa)
+                if forward:
+                    line.append(far)
+                else:
+                    line.insert(0, far)
+        lines.append([p for _k, p in line])
+    return lines
+
+
+def _ribbon(name, pts, nrms, half_w, a, b, point, n_mate, coll, closed=False,
+            extend=0.0):
+    """A solid strip along the polyline ``pts`` on the seam surface (points as
+    (u, z), mapped by ``point``): ``half_w`` either side of the line in the
+    surface (along ``nrms``), from ``a`` to ``b`` across it along ``n_mate``.
+    ``extend`` lengthens an open strip at both ends."""
+    pts = list(pts)
+    nrms = list(nrms)
+    if extend > 0.0 and not closed and len(pts) >= 2:
+        def push(p, q):
+            d = (p[0] - q[0], p[1] - q[1])
+            ln = math.hypot(*d) or 1.0
+            return (p[0] + d[0] / ln * extend, p[1] + d[1] / ln * extend)
+        pts = [push(pts[0], pts[1])] + pts + [push(pts[-1], pts[-2])]
+        nrms = [nrms[0]] + nrms + [nrms[-1]]
+    bm = bmesh.new()
+    rings = []
+    for (u, z), (nu, nz) in zip(pts, nrms):
+        l = point(u + nu * half_w, z + nz * half_w)
+        r = point(u - nu * half_w, z - nz * half_w)
+        rings.append([bm.verts.new(l + n_mate * a), bm.verts.new(r + n_mate * a),
+                      bm.verts.new(r + n_mate * b), bm.verts.new(l + n_mate * b)])
+    m = len(rings)
+    for i in range(m if closed else m - 1):
+        ra, rb = rings[i], rings[(i + 1) % m]
+        for k in range(4):
+            kn = (k + 1) % 4
+            bm.faces.new((ra[k], ra[kn], rb[kn], rb[k]))
+    if not closed:
+        bm.faces.new(rings[0])
+        bm.faces.new(list(reversed(rings[-1])))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return util.new_mesh_object(name, bm, coll)
+
+
+def _groove_seam(keyed, mating, bvh, dims, point, n_mate, u_range, z_range, level,
+                 chan_axis, coll, name):
+    """Tongue & Groove along one seam's wing. The wing is the band between
+    ``offset`` and ``offset + width`` from the model, so its middle is the line
+    on the seam surface at distance ``level`` from it: traced as a contour of
+    the distance (points ``point(u, z)``, a 1 mm grid over ``u_range`` x
+    ``z_range``), it runs wherever the wing does - up the sides, over the top,
+    round a cap. It is kept only where both pieces have wing on either side of
+    the groove (so it stops where the wing stops: the base, a funnel, a bolt
+    hole) and clear of ``chan_axis`` (the bottom-fill channel's centre line,
+    with its radius); cut into runs at sharp turns, each run is seated on its
+    own. Returns how many runs were cut."""
+    from . import build as _build
+    dg = bpy.context.evaluated_depsgraph_get()
+    step = 1.0
+    nu = max(int((u_range[1] - u_range[0]) / step), 2)
+    nz = max(int((z_range[1] - z_range[0]) / step), 2)
+    us = [u_range[0] + (u_range[1] - u_range[0]) * i / nu for i in range(nu + 1)]
+    zs = [z_range[0] + (z_range[1] - z_range[0]) * j / nz for j in range(nz + 1)]
+    grid = []
+    for u in us:
+        col = []
+        for z in zs:
+            p = point(u, z)
+            hit = bvh.find_nearest(p) if p is not None else None
+            col.append(hit[3] if hit and hit[0] is not None else None)
+        grid.append(col)
+    lines = _iso_lines(grid, us, zs, level)
+
+    reach = dims.gw * 0.5 + 1.0                    # wing kept round the groove
+
+    def ok(uv, nrm):
+        if point(*uv) is None:
+            return False
+        if chan_axis is not None:
+            q = point(*uv)
+            for a_, b_, rad in chan_axis:
+                ab = b_ - a_
+                f = max(0.0, min(1.0, (q - a_).dot(ab) / max(ab.length_squared, 1e-12)))
+                if (q - (a_ + ab * f)).length < rad + reach:
+                    return False
+        def wing_at(du, dz):
+            p = point(uv[0] + du, uv[1] + dz)
+            return p is not None and (
+                _build._inside_solid(keyed, p - n_mate * 0.3, dg)
+                and _build._inside_solid(mating, p + n_mate * 0.3, dg))
+        for s in (-reach, -dims.gw * 0.5, 0.0, dims.gw * 0.5, reach):
+            if not wing_at(nrm[0] * s, nrm[1] * s):
+                return False
+        # Ahead and behind along the line: a gap with wing again past it is a
+        # hole (a bolt) to stop short of; no wing past it is the wing's own end,
+        # which the tongue runs right up to.
+        tu, tz = nrm[1], -nrm[0]
+        for s in (-reach, reach):
+            for c in (-dims.gw * 0.5, 0.0, dims.gw * 0.5):
+                if wing_at(tu * s + nrm[0] * c, tz * s + nrm[1] * c):
+                    continue
+                past = s + math.copysign(6.0, s)
+                if wing_at(tu * past + nrm[0] * c, tz * past + nrm[1] * c):
+                    return False
+        return True
+
+    runs = []
+    for line in lines:
+        closed = len(line) > 3 and math.dist(line[0], line[-1]) < 1e-6
+        if closed:
+            line = line[:-1]
+        if len(line) < 3:
+            continue
+        nrms = []
+        for k in range(len(line)):
+            a_ = line[(k - 1) % len(line)] if (closed or k > 0) else line[k]
+            b_ = line[(k + 1) % len(line)] if (closed or k < len(line) - 1) else line[k]
+            tu, tz = b_[0] - a_[0], b_[1] - a_[1]
+            ln = math.hypot(tu, tz) or 1.0
+            nrms.append((-tz / ln, tu / ln))
+        good = [ok(p, n) for p, n in zip(line, nrms)]
+        if closed and all(good):
+            runs.append((line, nrms, True))
+            continue
+        # open runs of good points; a closed loop is unrolled at a bad point
+        order = list(range(len(line)))
+        if closed:
+            first_bad = good.index(False)
+            order = order[first_bad:] + order[:first_bad]
+        cur = []
+        for k in order:
+            if good[k]:
+                cur.append(k)
+            else:
+                if len(cur) >= 3:
+                    runs.append(([line[i] for i in cur], [nrms[i] for i in cur], False))
+                cur = []
+        if len(cur) >= 3:
+            runs.append(([line[i] for i in cur], [nrms[i] for i in cur], False))
+
+    # split at sharp turns: a strip folds over itself on the inside of one
+    pieces = []
+    for pts, nrms, closed in runs:
+        cut_at = [k for k in range(1, len(pts) - 1)
+                  if nrms[k - 1][0] * nrms[k + 1][0] + nrms[k - 1][1] * nrms[k + 1][1]
+                  < math.cos(math.radians(35.0))]
+        if not cut_at:
+            pieces.append((pts, nrms, closed))
+            continue
+        bounds = [0] + cut_at + [len(pts) - 1]
+        for a_, b_ in zip(bounds, bounds[1:]):
+            if b_ - a_ >= 2:
+                pieces.append((pts[a_:b_ + 1], nrms[a_:b_ + 1], False))
+
+    done = 0
+    for k, (pts, nrms, closed) in enumerate(pieces):
+        if sum(math.dist(p, q) for p, q in zip(pts, pts[1:])) < 3.0:
+            continue
+        tongue = _ribbon(f"{name}t{k}", pts, nrms, dims.width * 0.5, -0.3,
+                         dims.depth, point, n_mate, coll, closed)
+        groove = _ribbon(f"{name}g{k}", pts, nrms, dims.gw * 0.5, -0.05,
+                         dims.depth + dims.clear, point, n_mate, coll, closed,
+                         extend=dims.clear)
+        if _seat_wing_key(keyed, mating, tongue, groove, coll):
+            done += 1
+    return done
+
+
+def _chan_axis(chan):
+    """The bottom-fill channel as segments ``(a, b, radius)`` to keep a groove
+    off: the gate, the pipe (its tube's radius) and the mouth (its cup's
+    rim), or None."""
+    if chan is None:
+        return None
     from . import channel as _channel
-    far = 1000.0
-    rows = []
-    z = z_lo
-    while z <= z_hi:
-        skip = any(abs(z - zb) < dims.bolt_r + dims.clear + 1.0 for zb in bolt_zs)
-        span = None
-        if not skip:
-            hk, lk, _n, _i = keyed.ray_cast(point(far, z) - n_mate * 0.4, -d)
-            hm, lm, _n2, _i2 = master.ray_cast(point(far, z), -d)
-            if hk and hm:
-                outer = (lk - origin).dot(d)
-                inner = (lm - origin).dot(d) + offset
-                if chan is not None:
-                    if abs(z - chan["gate_z"]) < chan["tube_out"] + dims.gw:
-                        inner = outer                      # the gate crosses here
-                    else:
-                        lo, hi = _channel._axis_span(chan, z - dims.gw, z + dims.gw)
-                        lo, hi = lo + chan_shift, hi + chan_shift
-                        if chan.get("hug"):
-                            inner = max(inner, hi + chan["tube_out"] + 0.5)
-                        edge = _channel.wing_edge(chan, z)
-                        if edge is not None:
-                            outer = min(outer, edge + chan_shift)
-                        if not chan.get("hug"):
-                            outer = min(outer, lo - chan["tube_out"] - 0.5)
-                if outer - inner >= dims.gw + 2.0:
-                    span = (inner + outer) * 0.5
-        rows.append((z, span))
-        z += 2.0
-    segs, cur = [], []
-    for z, tc in rows:
-        if tc is None:
-            if len(cur) >= 2:
-                segs.append(cur)
-            cur = []
-        else:
-            cur.append((z, tc))
-    if len(cur) >= 2:
-        segs.append(cur)
-    if not segs:
-        return False
-
-    def strips(nm, half_w, thick, shift, extend):
-        objs = []
-        for seg in segs:
-            rows_ = [(z, tc - half_w, tc + half_w) for z, tc in seg]
-            if extend:
-                z0, a0, b0 = rows_[0]
-                z1, a1, b1 = rows_[-1]
-                rows_ = [(z0 - extend, a0, b0)] + rows_ + [(z1 + extend, a1, b1)]
-            fr = types.SimpleNamespace(point=lambda t, z: point(t, z) + n_mate * shift,
-                                       n=n_mate)
-            objs.append(_channel._sheet(nm, fr, rows_, thick, coll))
-        first = objs[0]
-        for o in objs[1:]:
-            util.boolean(first, o, 'UNION')
-            util.remove_object(o)
-        return first
-
-    # tongue: 0.3 mm rooted in the keyed piece, ``depth`` out into the mating one
-    tongue = strips(name + "t", dims.width * 0.5, dims.depth + 0.3,
-                    (dims.depth - 0.3) * 0.5, 0.0)
-    groove = strips(name + "g", dims.gw * 0.5, dims.depth + dims.clear + 0.1,
-                    (dims.depth + dims.clear - 0.1) * 0.5, dims.clear)
-    return _seat_wing_key(keyed, mating, tongue, groove, coll)
+    fr = chan["frame"]
+    tube = chan["tube_out"]
+    zs = [chan["z0"] + (chan["throat"] - chan["z0"]) * i / 60 for i in range(61)]
+    pts = [fr.point(_channel.axis_at(chan, z), z) for z in zs]
+    segs = [(a, b, tube) for a, b in zip(pts, pts[1:])]
+    gate = [fr.point(chan["t_pipe"] - (chan["t_pipe"] - chan["t_cav"]) * i / 6,
+                     chan["gate_z"]) for i in range(7)]
+    segs += [(a, b, tube) for a, b in zip(gate, gate[1:])]
+    top = pts[-1]
+    rim = chan.get("mouth_r", tube) + (tube - chan["bore_r"])
+    segs.append((top, Vector((top.x, top.y, chan["apex"] + 1.0)), rim))
+    return segs
 
 
 def _add_wing_grooves(half_a, half_b, master, props, ai, mn, mx, coll, off, bolt_zs,
                       offset, parting=None, chan=None):
-    """Tongue & Groove up both sides of a 2-piece mold's wing: the tongue on
-    half_a's face, the groove in half_b (the keyed piece keeps the +axis side
-    of the seam, as with the keys). Follows a contoured parting. Returns how
-    many sides got one."""
+    """Tongue & Groove along a 2-piece mold's wing: the tongue on half_a's face,
+    the groove in half_b (the keyed piece keeps the +axis side of the seam, as
+    with the keys); one contour round the whole wing, following a contoured
+    parting. Returns how many runs were cut."""
     dims = _groove_dims(props)
     if dims is None:
         return 0
@@ -866,54 +1041,50 @@ def _add_wing_grooves(half_a, half_b, master, props, ai, mn, mx, coll, off, bolt
     center = (mn + mx) * 0.5
     seam_flat = center[ai] + off
     n_mate = Vector((0.0, 0.0, 0.0)); n_mate[ai] = -1.0
-    mz0, mz1 = util.world_bbox(master)[0].z, util.world_bbox(master)[1].z
-    fr = chan["frame"] if chan is not None and not chan["frame"].multipart else None
-    done = 0
-    for sgn in (1.0, -1.0):
-        d = Vector((0.0, 0.0, 0.0)); d[h] = sgn
-        origin = center.copy(); origin.z = 0.0
+    width = max(getattr(props, "wing_width", 8.0), 2.0)
+    cut = parting.cutter if parting is not None else None
+    cut_top = util.world_bbox(cut)[1][ai] + 10.0 if cut is not None else 0.0
+    down = Vector((0.0, 0.0, 0.0)); down[ai] = -1.0
 
-        def point(t, z, sgn=sgn):
-            p = origin.copy()
-            p[h] = origin[h] + sgn * t
-            p.z = z
-            s = parting_at(parting, p[h], z) if parting is not None else None
-            p[ai] = seam_flat if s is None else s
-            return p
-        on_chan = fr is not None and (fr.d[h] > 0) == (sgn > 0)
-        shift = ((fr.center - origin).dot(d)) if on_chan else 0.0
-        if _groove_side(half_a, half_b, master, dims, point, d, n_mate, origin,
-                        mz0 + 1.0, mz1 - 1.0, offset, bolt_zs,
-                        chan if on_chan else None, shift, coll, "MF_wgr"):
-            done += 1
-    return done
+    def point(u, z):
+        p = center.copy()
+        p[h] = u
+        p.z = z
+        p[ai] = seam_flat
+        if cut is not None:                     # parting_at, with the bbox read once
+            o = p.copy(); o[ai] = cut_top
+            hit, loc, _n, _i = cut.ray_cast(o, down)
+            if hit:
+                p[ai] = loc[ai]
+        return p
+    return _groove_seam(half_a, half_b, _model_bvh(master), dims, point, n_mate,
+                        (mn[h] - 2.0, mx[h] + 2.0), (mn.z - 2.0, mx.z + 2.0),
+                        offset + width * 0.5, _chan_axis(chan), coll, "MF_wgr")
 
 
 def _add_radial_wing_grooves(parts, center, mn, mx, props, coll, n, master, bolt_zs,
                              offset, chan=None):
-    """Tongue & Groove up each radial seam's flange: the tongue on wedge k,
-    the groove in wedge k - 1 (as with the radial keys). Returns how many
-    seams got one."""
+    """Tongue & Groove along each radial seam's flange: the tongue on wedge k,
+    the groove in wedge k - 1 (as with the radial keys). Returns how many runs
+    were cut."""
     dims = _groove_dims(props)
     if dims is None:
         return 0
-    mz0, mz1 = util.world_bbox(master)[0].z, util.world_bbox(master)[1].z
-    origin = Vector((center.x, center.y, 0.0))
-    on_chan = chan is not None and chan["frame"].multipart
+    width = max(getattr(props, "wing_width", 8.0), 2.0)
+    bvh = _model_bvh(master)
+    far = max(mx.x - mn.x, mx.y - mn.y) + 5.0
+    axis = _chan_axis(chan) if chan is not None and chan["frame"].multipart else None
     done = 0
     for k in range(n):
         theta = 2.0 * math.pi * k / n
         d = Vector((math.cos(theta), math.sin(theta), 0.0))
         nrm = Vector((-math.sin(theta), math.cos(theta), 0.0))   # into wedge k
 
-        def point(t, z, d=d):
-            return Vector((origin.x, origin.y, z)) + d * t
-        use_chan = chan if (on_chan and k == 0) else None
-        shift = ((chan["frame"].center - origin).dot(d)) if use_chan else 0.0
-        if _groove_side(parts[k], parts[(k - 1) % n], master, dims, point, d, -nrm,
-                        origin, mz0 + 1.0, mz1 - 1.0, offset, bolt_zs, use_chan, shift,
-                        coll, "MF_rwgr"):
-            done += 1
+        def point(u, z, d=d):
+            return Vector((center.x, center.y, z)) + d * u
+        done += _groove_seam(parts[k], parts[(k - 1) % n], bvh, dims, point, -nrm,
+                             (0.0, far), (mn.z - 2.0, mx.z + 2.0), offset + width * 0.5,
+                             axis if k == 0 else None, coll, f"MF_rwgr{k}_")
     return done
 
 
