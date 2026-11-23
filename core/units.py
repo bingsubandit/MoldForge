@@ -33,6 +33,7 @@ LENGTH_PROPS = frozenset({
     "screw_diameter", "screw_head_diameter", "screw_head_depth",
     "insert_diameter", "insert_depth",
     "channel_radius", "label_size", "label_depth",
+    "wing_groove_width", "wing_groove_depth",
 })
 
 

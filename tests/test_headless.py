@@ -2949,6 +2949,87 @@ def main():
           and mfutil.nonmanifold_count(mb_) == 0,
           f"Clean Up Model Now repairs the model itself ({op_})")
 
+    # Tongue & Groove (user request): instead of keys, a continuous tongue up
+    # one piece's wing seats in a groove in the other's - aligns the whole seam
+    # and seals it, like the key plate's ring. Never into the channel's pipe.
+    print("\n=== Tongue & Groove up the wing ===")
+    from moldforge.core import channel as mfchan_g
+    real_seat_g = split._seat_wing_key
+    real_bore_g = mfchan_g.bore_channel
+    for cfg_g in (dict(parts_count=2), dict(parts_count=3),
+                  dict(parts_count=2, pour_channel=True),
+                  dict(parts_count=2, pour_channel=True, channel_hug=True),
+                  dict(parts_count=2, bolt_auto=True)):
+        seen_g = {"pairs": []}
+
+        def _spy_seat_g(keyed, mating, male, socket, coll):
+            if male.name.startswith(("MF_wgr", "MF_rwgr")):
+                t_ = mfutil.duplicate_object(male, "MF_gtest_t", coll)
+                g_ = mfutil.duplicate_object(socket, "MF_gtest_g", coll)
+                ok_ = real_seat_g(keyed, mating, male, socket, coll)
+                if ok_:
+                    seen_g["pairs"].append((keyed.name, mating.name, t_, g_))
+                else:
+                    mfutil.remove_object(t_)
+                    mfutil.remove_object(g_)
+                return ok_
+            return real_seat_g(keyed, mating, male, socket, coll)
+
+        def _spy_bore_g(mold, geo, coll):
+            seen_g["probe"] = pipe_probe(geo)
+            return real_bore_g(mold, geo, coll)
+        split._seat_wing_key = _spy_seat_g
+        mfchan_g.bore_channel = _spy_bore_g
+        try:
+            reset_scene()
+            rg_ = pipeline.build_mold_system(make_bell_master("Bell"), _over(
+                default_props(), box_style='POUR_BOX', base_style='OPEN', wings=True,
+                sprue=False, vent_count=0, wing_keys='GROOVE', **cfg_g))
+            bpy.context.view_layer.update()
+        finally:
+            split._seat_wing_key = real_seat_g
+            mfchan_g.bore_channel = real_bore_g
+        n_g = cfg_g["parts_count"]
+        home_g = rg_["positive"].location
+        by_name = {q.name: q for q in rg_["parts"]}
+        seated, cut, tall = [], [], []
+        mh_ = None
+        for kn, mn_, t_, g_ in seen_g["pairs"]:
+            for o_ in (t_, g_):
+                o_.location = home_g
+            bpy.context.view_layer.update()
+            tv = volume.mesh_volume(t_)
+            gv = volume.mesh_volume(g_)
+            it = mfutil.duplicate_object(t_, "MF_gtest_i", t_.users_collection[0])
+            mfutil.boolean(it, by_name[kn], 'INTERSECT')
+            ig = mfutil.duplicate_object(g_, "MF_gtest_j", g_.users_collection[0])
+            mfutil.boolean(ig, by_name[mn_], 'INTERSECT')
+            seated.append(volume.mesh_volume(it) / max(tv, 1e-9))
+            cut.append(volume.mesh_volume(ig) / max(gv, 1e-9))
+            zb = mfutil.world_bbox(t_)
+            tall.append(zb[1].z - zb[0].z)
+            for o_ in (t_, g_, it, ig):
+                mfutil.remove_object(o_)
+        mh_ = 90.0
+        faults_g = (pipe_faults(seen_g["probe"],
+                                [q for q in rg_["parts"] if q.name.startswith("MF_Mold_")],
+                                home_g) if "probe" in seen_g else {})
+        check(all(mfutil.part_is_valid(q)[0] for q in rg_["parts"])
+              and rg_.get("wing_grooves") == n_g and len(seen_g["pairs"]) == n_g
+              and not rg_.get("wing_keys"),
+              f"Tongue & Groove {cfg_g}: one up every side of the wing "
+              f"({rg_.get('wing_grooves')} of {n_g}), no keys, valid parts")
+        check(seated and min(seated) > 0.95 and max(cut) < 0.05
+              and min(tall) > mh_ * 0.4,
+              f"... the tongue is part of one piece and its groove is cut out of the "
+              f"other, running up the wing (tongue in its piece "
+              f"{min(seated or [0]):.0%}, groove left in the other {max(cut or [1]):.0%}, "
+              f"shortest run {min(tall or [0]):.0f} mm)")
+        if cfg_g.get("pour_channel"):
+            check(not any(faults_g.values()),
+                  f"... and the channel's pipe is still whole round it "
+                  f"({ {k_: v_[:4] for k_, v_ in faults_g.items() if v_} or 'no faults'})")
+
     # --- Label on the case (review request): the weights, debossed.
     print("\n=== Label on the case ===")
     from moldforge.core import label as mflabel_t

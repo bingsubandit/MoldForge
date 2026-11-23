@@ -226,6 +226,8 @@ def summary_parting(props):
 def summary_wings(props):
     if not props.wings:
         return "off"
+    if props.wing_keys == 'GROOVE':
+        return "tongue & groove"
     if props.wing_keys != 'NONE':
         return props.wing_keys.lower() + " keys"
     return f"{props.wing_width:g} mm"
@@ -763,7 +765,12 @@ class MOLDFORGE_PT_wings(_MFSub, bpy.types.Panel):
         layout.active = props.wings
         layout.prop(props, "wing_width", text="Width")
         layout.prop(props, "wing_keys", text="Alignment")
-        if props.wing_keys != 'NONE':
+        if props.wing_keys == 'GROOVE':
+            col = layout.column(align=True)
+            col.prop(props, "wing_groove_width", text="Tongue width")
+            col.prop(props, "wing_groove_depth", text="Tongue height")
+            layout.prop(props, "fit_clearance", text="Clearance")
+        elif props.wing_keys != 'NONE':
             col = layout.column(align=True)
             col.prop(props, "wing_key_size", text="Key size")
             col.prop(props, "wing_key_height", text="Key height")

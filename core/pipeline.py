@@ -1133,6 +1133,7 @@ def _build_once(master, props, trim_ok=False):
             "plug_wall": plug_wall,
             "wing_notes": list(getattr(p, "wing_report", [])),
             "wing_keys": getattr(p, "wing_keys_placed", 0),
+            "wing_grooves": getattr(p, "wing_grooves_cut", 0),
             "label_note": label_note,
             "legs": legs_built,
             "legs_note": legs_note,
@@ -1381,6 +1382,9 @@ def _channel_wing(p, axis, multipart, wing_bolt_zs):
     dims = split._wing_key_dims(p)
     key_need = (max(dims.width * 0.45, dims.R + 1.2) + dims.R + dims.clear + 1.0
                 if dims is not None else 0.0)
+    if getattr(p, "wing_keys", 'NONE') == 'GROOVE':      # room for the tongue
+        key_need = (max(getattr(p, "wing_groove_width", 2.0), 0.6)
+                    + 2.0 * max(getattr(p, "fit_clearance", 0.2), 0.0) + 3.0)
     bolt_need = 2.0 * p.bolt_radius + 3.0 if bolt_zs else 0.0
     return types.SimpleNamespace(
         thickness=p.wing_thickness,
@@ -1595,6 +1599,9 @@ def _derive_sizes(work, props):
         wing_key_size=getattr(props, "wing_key_size", 6.0),
         wing_key_height=getattr(props, "wing_key_height", 0.0),
         wing_key_spacing=getattr(props, "wing_key_spacing", 40.0),
+        wing_groove_width=getattr(props, "wing_groove_width", 2.0),
+        wing_groove_depth=getattr(props, "wing_groove_depth", 0.0),
+        wing_grooves_cut=0,
         wing_thickness=max(2.0 * shell, wall, 3.0),
         # Cleanup-remesh resolution. A pour box only prints a jacket (the real
         # model captures detail in the silicone), so a coarse, fast voxel keyed to

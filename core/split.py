@@ -36,7 +36,7 @@ def split_parts(mold, master, axis, props, coll, wall, radial_center=None,
     if n <= 2:
         half_a, half_b = split(mold, master, axis, props, coll, wall,
                                wing_bolt_zs=wing_bolt_zs, parting=parting,
-                               wing_chan=wing_chan)
+                               wing_chan=wing_chan, wing_offset=wing_offset)
         return [half_a, half_b]
     return _split_radial(mold, master, props, coll, wall, n, center=radial_center,
                          wing_offset=wing_offset, wing_chan=wing_chan)
@@ -66,7 +66,7 @@ def _valid(obj):
 
 
 def split(mold, master, axis, props, coll, wall, wing_bolt_zs=None, parting=None,
-          wing_chan=None):
+          wing_chan=None, wing_offset=0.0):
     """``parting`` (from ``parting_surface``, built before the clamp wings) is the
     contoured surface the wings were cut along: the halves are split on exactly
     that surface, so each half keeps its half of every wing."""
@@ -125,10 +125,15 @@ def split(mold, master, axis, props, coll, wall, wing_bolt_zs=None, parting=None
     # across the wings either way). ``wing_bolt_zs is None`` means no wings were
     # built (off, or rolled back), so nothing to key onto.
     if (getattr(props, "wings", False) and wing_bolt_zs is not None
-            and getattr(props, "wing_keys", 'NONE') != 'NONE'):
+            and getattr(props, "wing_keys", 'NONE') not in ('NONE', 'GROOVE')):
         _record_wing_keys(props, _add_wing_keys(
             half_a, half_b, props, axis, ai, mn, mx, coll, off, wing_bolt_zs,
             parting=parting if contoured_used else None, chan=wing_chan))
+    if (getattr(props, "wings", False) and wing_bolt_zs is not None
+            and getattr(props, "wing_keys", 'NONE') == 'GROOVE'):
+        _record_wing_grooves(props, _add_wing_grooves(
+            half_a, half_b, master, props, ai, mn, mx, coll, off, wing_bolt_zs,
+            wing_offset, parting=parting if contoured_used else None, chan=wing_chan))
 
     return half_a, half_b
 
@@ -502,7 +507,7 @@ def _wing_key_dims(props):
     height a key never protrudes deeper than that lip minus the fit clearance minus
     a socket floor - a socket can never punch through the mating wing."""
     style = getattr(props, "wing_keys", 'NONE')
-    if style == 'NONE':
+    if style in ('NONE', 'GROOVE'):
         return None
     width = max(getattr(props, "wing_width", 8.0), 2.0)
     thickness = max(getattr(props, "wing_thickness", 4.0), 2.0)
@@ -751,6 +756,180 @@ def _add_radial_wing_keys(parts, center, mn, mx, props, coll, n, master, bolt_zs
     return placed
 
 
+# --- Tongue & Groove up the wing ------------------------------------------------ #
+
+def _groove_dims(props):
+    """Tongue & Groove sizing, or None when the wing lip is too thin for one.
+    Each piece keeps half the wing's thickness at the seam, so the groove (the
+    tongue's height plus the clearance) never goes deeper than that lip less a
+    0.5 mm floor."""
+    thickness = max(getattr(props, "wing_thickness", 4.0), 2.0)
+    clear = max(getattr(props, "fit_clearance", 0.2), 0.0)
+    cap = thickness * 0.5 - clear - 0.5
+    if cap < 0.4:
+        return None
+    want = getattr(props, "wing_groove_depth", 0.0)
+    depth = min(want if want > 0.0 else 2.0, cap)
+    width = max(getattr(props, "wing_groove_width", 2.0), 0.6)
+    return types.SimpleNamespace(depth=depth, width=width, clear=clear,
+                                 gw=width + 2.0 * clear,
+                                 bolt_r=getattr(props, "bolt_radius", 1.5))
+
+
+def _groove_side(keyed, mating, master, dims, point, d, n_mate, origin, z_lo, z_hi,
+                 offset, bolt_zs, chan, chan_shift, coll, name):
+    """Tongue & Groove up one side of a seam's wing. ``point(t, z)`` is the seam
+    surface ``t`` out along ``d`` from ``origin`` at height z; ``n_mate`` points
+    from ``keyed`` into ``mating``. At every 2 mm of height the wing runs from
+    the case's outside (the model's reach on the seam plus ``offset``) to its
+    edge (``keyed``'s outermost point there); the tongue runs up the middle of
+    that span, skipped where it is too narrow, round bolt holes and round the
+    bottom-fill channel ``chan`` (its pipe, its gate). Returns True if cut."""
+    from . import channel as _channel
+    far = 1000.0
+    rows = []
+    z = z_lo
+    while z <= z_hi:
+        skip = any(abs(z - zb) < dims.bolt_r + dims.clear + 1.0 for zb in bolt_zs)
+        span = None
+        if not skip:
+            hk, lk, _n, _i = keyed.ray_cast(point(far, z) - n_mate * 0.4, -d)
+            hm, lm, _n2, _i2 = master.ray_cast(point(far, z), -d)
+            if hk and hm:
+                outer = (lk - origin).dot(d)
+                inner = (lm - origin).dot(d) + offset
+                if chan is not None:
+                    if abs(z - chan["gate_z"]) < chan["tube_out"] + dims.gw:
+                        inner = outer                      # the gate crosses here
+                    else:
+                        lo, hi = _channel._axis_span(chan, z - dims.gw, z + dims.gw)
+                        lo, hi = lo + chan_shift, hi + chan_shift
+                        if chan.get("hug"):
+                            inner = max(inner, hi + chan["tube_out"] + 0.5)
+                        edge = _channel.wing_edge(chan, z)
+                        if edge is not None:
+                            outer = min(outer, edge + chan_shift)
+                        if not chan.get("hug"):
+                            outer = min(outer, lo - chan["tube_out"] - 0.5)
+                if outer - inner >= dims.gw + 2.0:
+                    span = (inner + outer) * 0.5
+        rows.append((z, span))
+        z += 2.0
+    segs, cur = [], []
+    for z, tc in rows:
+        if tc is None:
+            if len(cur) >= 2:
+                segs.append(cur)
+            cur = []
+        else:
+            cur.append((z, tc))
+    if len(cur) >= 2:
+        segs.append(cur)
+    if not segs:
+        return False
+
+    def strips(nm, half_w, thick, shift, extend):
+        objs = []
+        for seg in segs:
+            rows_ = [(z, tc - half_w, tc + half_w) for z, tc in seg]
+            if extend:
+                z0, a0, b0 = rows_[0]
+                z1, a1, b1 = rows_[-1]
+                rows_ = [(z0 - extend, a0, b0)] + rows_ + [(z1 + extend, a1, b1)]
+            fr = types.SimpleNamespace(point=lambda t, z: point(t, z) + n_mate * shift,
+                                       n=n_mate)
+            objs.append(_channel._sheet(nm, fr, rows_, thick, coll))
+        first = objs[0]
+        for o in objs[1:]:
+            util.boolean(first, o, 'UNION')
+            util.remove_object(o)
+        return first
+
+    # tongue: 0.3 mm rooted in the keyed piece, ``depth`` out into the mating one
+    tongue = strips(name + "t", dims.width * 0.5, dims.depth + 0.3,
+                    (dims.depth - 0.3) * 0.5, 0.0)
+    groove = strips(name + "g", dims.gw * 0.5, dims.depth + dims.clear + 0.1,
+                    (dims.depth + dims.clear - 0.1) * 0.5, dims.clear)
+    return _seat_wing_key(keyed, mating, tongue, groove, coll)
+
+
+def _add_wing_grooves(half_a, half_b, master, props, ai, mn, mx, coll, off, bolt_zs,
+                      offset, parting=None, chan=None):
+    """Tongue & Groove up both sides of a 2-piece mold's wing: the tongue on
+    half_a's face, the groove in half_b (the keyed piece keeps the +axis side
+    of the seam, as with the keys). Follows a contoured parting. Returns how
+    many sides got one."""
+    dims = _groove_dims(props)
+    if dims is None:
+        return 0
+    h = next(i for i in range(3) if i != ai and i != 2)
+    center = (mn + mx) * 0.5
+    seam_flat = center[ai] + off
+    n_mate = Vector((0.0, 0.0, 0.0)); n_mate[ai] = -1.0
+    mz0, mz1 = util.world_bbox(master)[0].z, util.world_bbox(master)[1].z
+    fr = chan["frame"] if chan is not None and not chan["frame"].multipart else None
+    done = 0
+    for sgn in (1.0, -1.0):
+        d = Vector((0.0, 0.0, 0.0)); d[h] = sgn
+        origin = center.copy(); origin.z = 0.0
+
+        def point(t, z, sgn=sgn):
+            p = origin.copy()
+            p[h] = origin[h] + sgn * t
+            p.z = z
+            s = parting_at(parting, p[h], z) if parting is not None else None
+            p[ai] = seam_flat if s is None else s
+            return p
+        on_chan = fr is not None and (fr.d[h] > 0) == (sgn > 0)
+        shift = ((fr.center - origin).dot(d)) if on_chan else 0.0
+        if _groove_side(half_a, half_b, master, dims, point, d, n_mate, origin,
+                        mz0 + 1.0, mz1 - 1.0, offset, bolt_zs,
+                        chan if on_chan else None, shift, coll, "MF_wgr"):
+            done += 1
+    return done
+
+
+def _add_radial_wing_grooves(parts, center, mn, mx, props, coll, n, master, bolt_zs,
+                             offset, chan=None):
+    """Tongue & Groove up each radial seam's flange: the tongue on wedge k,
+    the groove in wedge k - 1 (as with the radial keys). Returns how many
+    seams got one."""
+    dims = _groove_dims(props)
+    if dims is None:
+        return 0
+    mz0, mz1 = util.world_bbox(master)[0].z, util.world_bbox(master)[1].z
+    origin = Vector((center.x, center.y, 0.0))
+    on_chan = chan is not None and chan["frame"].multipart
+    done = 0
+    for k in range(n):
+        theta = 2.0 * math.pi * k / n
+        d = Vector((math.cos(theta), math.sin(theta), 0.0))
+        nrm = Vector((-math.sin(theta), math.cos(theta), 0.0))   # into wedge k
+
+        def point(t, z, d=d):
+            return Vector((origin.x, origin.y, z)) + d * t
+        use_chan = chan if (on_chan and k == 0) else None
+        shift = ((chan["frame"].center - origin).dot(d)) if use_chan else 0.0
+        if _groove_side(parts[k], parts[(k - 1) % n], master, dims, point, d, -nrm,
+                        origin, mz0 + 1.0, mz1 - 1.0, offset, bolt_zs, use_chan, shift,
+                        coll, "MF_rwgr"):
+            done += 1
+    return done
+
+
+def _record_wing_grooves(props, done):
+    """Keep the Tongue & Groove count for the build result, and tell the user
+    when the wing had no room for one."""
+    try:
+        props.wing_grooves_cut = done
+    except Exception:
+        pass
+    if done == 0:
+        from . import build
+        build.wing_note(props, "the wings had no room for a tongue and groove "
+                               "(too thin or too narrow) - none was cut")
+
+
 def cut_horizontal(parts, coll, hz):
     """Back-compat: single horizontal seam (Top/Bottom stack)."""
     return cut_stack(parts, coll, [hz])
@@ -841,8 +1020,13 @@ def _split_radial(mold, master, props, coll, wall, n, center=None, wing_offset=0
     # wings were not built (off, or rolled back), so there is nothing to key onto.
     bolt_zs = getattr(props, "radial_bolt_zs", None)
     if (getattr(props, "wings", False) and bolt_zs is not None
-            and getattr(props, "wing_keys", 'NONE') != 'NONE'):
+            and getattr(props, "wing_keys", 'NONE') not in ('NONE', 'GROOVE')):
         _record_wing_keys(props, _add_radial_wing_keys(
+            parts, center, mn, mx, props, coll, n, master, bolt_zs, wing_offset,
+            chan=wing_chan))
+    if (getattr(props, "wings", False) and bolt_zs is not None
+            and getattr(props, "wing_keys", 'NONE') == 'GROOVE'):
+        _record_wing_grooves(props, _add_radial_wing_grooves(
             parts, center, mn, mx, props, coll, n, master, bolt_zs, wing_offset,
             chan=wing_chan))
     return parts

@@ -4,6 +4,13 @@ All notable changes. Versions are the add-on `version` in `blender_manifest.toml
 
 ## Unreleased
 
+- **New: Tongue & Groove wing alignment.** A new Wing Alignment choice: instead
+  of keys, a continuous tongue runs up the middle of one piece's wing face and
+  seats in a groove in the other's (grown by Fit Clearance), like the key
+  plate's ring tongue, so the whole seam is aligned and sealed for the pour.
+  Tongue Width and Tongue Height (0 = automatic, capped by the wing lip) set
+  its size. Works on 2-piece and radial molds and follows a contoured parting;
+  it stops round bolt holes and the bottom-fill channel's pipe and gate.
 - **Fixed: a Follow Model pipe that wasn't sealed or couldn't be poured**
   (user report on the mushroom). Its mouth could sit under the top pour funnel,
   which capped it; the pipe arrived at the mouth leaning, leaving a hole under

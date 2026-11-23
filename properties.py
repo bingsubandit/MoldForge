@@ -484,16 +484,20 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
                       "How far the clamp flanges spread out past the sides")
     wing_keys: EnumProperty(
         name="Wing Alignment",
-        description="Alignment keys on the wing mating faces: a raised key on one "
-                    "half seats into a matching socket in the other (grown by Fit "
-                    "Clearance), so the bolted pieces can't shear - on every seam, "
-                    "2-piece or radial. Placed between the bolt holes and sized to "
-                    "the wing lip",
+        description="Alignment on the wing mating faces, on every seam (2-piece or "
+                    "radial): keys - a raised key on one half seats into a matching "
+                    "socket in the other (grown by Fit Clearance), placed between "
+                    "the bolt holes - or a Tongue & Groove running up the wing",
         items=[
             ('NONE', "None", "No alignment keys on the wings (the bolts alone align)"),
             ('CONE', "Cone", "Pointed cone pins - self-centering, easiest to seat"),
             ('DOME', "Half Sphere", "Dome bumps - smooth engage and release"),
             ('FRUSTUM', "Half Cone", "Truncated cone pads - sturdy, shear-resistant"),
+            ('GROOVE', "Tongue & Groove",
+             "A continuous tongue up the middle of one piece's wing face seats in a "
+             "groove in the other's (grown by Fit Clearance), like the key plate's "
+             "ring: aligns along the whole seam and seals it for the pour. Broken "
+             "only round bolt holes and the bottom-fill channel"),
         ],
         default='CONE',
     )
@@ -514,6 +518,18 @@ class MoldForgeProperties(bpy.types.PropertyGroup):
                             "are spread evenly at this distance (a tall mold gets a "
                             "whole row), dodging the bolt holes",
                             mn=5.0, soft=120.0)
+    wing_groove_width: _dist("Tongue Width", 2.0,
+                             "Width of the Tongue & Groove's tongue across the wing "
+                             "face; the groove is Fit Clearance wider on each side. "
+                             "The tongue runs up the middle of the wing, skipped where "
+                             "the wing is too narrow for it",
+                             mn=0.6, soft=6.0)
+    wing_groove_depth: _dist("Tongue Height", 0.0,
+                             "How far the tongue stands out of the wing face (the "
+                             "groove is Fit Clearance deeper). 0 = automatic: as tall "
+                             "as the wing lip allows, up to 2 mm; never so deep the "
+                             "groove pierces the mating wing",
+                             mn=0.0, soft=4.0)
     wing_band_notches: BoolProperty(
         name="Band Notches",
         description="Notches across the clamp wings' outer edges every 30 mm, for "
